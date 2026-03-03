@@ -15,7 +15,15 @@ set -e
 
 WEBSERVER_PORT="${1:-8081}"
 WEBSERVER_URL="http://127.0.0.1:${WEBSERVER_PORT}"
-NANOBOT_DIR="/Users/zhangxingcheng/Documents/code/workspace/nanobot"
+
+# Auto-detect nanobot installation directory from `which nanobot`
+NANOBOT_BIN=$(which nanobot 2>/dev/null)
+if [ -z "$NANOBOT_BIN" ]; then
+    echo "❌ Error: nanobot not found in PATH"
+    exit 1
+fi
+NANOBOT_BINDIR=$(cd "$(dirname "$NANOBOT_BIN")" && pwd)
+NANOBOT_DIR=$(cd "$NANOBOT_BINDIR/../.." && pwd)
 
 echo "=== Restart Gateway via Web-Chat API ==="
 echo "Webserver URL: ${WEBSERVER_URL}"
@@ -59,6 +67,7 @@ echo "🚀 Sending restart command to web-chat worker..."
 RESTART_MSG=$(python3 -c "
 import json
 pid = '${GATEWAY_PID}' or 'unknown'
+nanobot_bin = '${NANOBOT_BIN}'
 nanobot_dir = '${NANOBOT_DIR}'
 msg = f'''请立即执行以下操作重启 nanobot gateway（不要询问确认，直接执行）：
 
@@ -70,7 +79,9 @@ sleep 2
 
 Step 3: 用 Python double-fork 方式后台启动新 gateway
 python3 -c \"
-import os, sys
+import os, sys, shutil
+nanobot_bin = shutil.which('nanobot')
+nanobot_dir = os.path.dirname(os.path.dirname(os.path.dirname(nanobot_bin)))
 pid = os.fork()
 if pid > 0:
     print(f'Daemon forked, first child pid={{pid}}')
@@ -79,13 +90,13 @@ os.setsid()
 pid2 = os.fork()
 if pid2 > 0:
     sys.exit(0)
-os.chdir('{nanobot_dir}')
+os.chdir(nanobot_dir)
 with open('/tmp/nanobot-gateway.log', 'a') as log:
     os.dup2(log.fileno(), 1)
     os.dup2(log.fileno(), 2)
 with open('/dev/null', 'r') as devnull:
     os.dup2(devnull.fileno(), 0)
-os.execv('./venv311/bin/nanobot', ['nanobot', 'gateway'])
+os.execv(nanobot_bin, ['nanobot', 'gateway'])
 \"
 
 Step 4: 验证新进程已启动

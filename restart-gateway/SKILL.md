@@ -24,7 +24,7 @@
 ### 方法 1：直接执行脚本（推荐，飞书/Telegram agent 可用）
 
 ```bash
-bash /Users/zhangxingcheng/.nanobot/workspace/skills/restart-gateway/scripts/restart_gateway.sh
+bash ~/.nanobot/workspace/skills/restart-gateway/scripts/restart_gateway.sh
 ```
 
 exec 工具可以执行 bash 脚本文件（脚本内部的 `&` 不受限制），脚本会自动：
@@ -71,8 +71,11 @@ curl -s -X POST http://127.0.0.1:8081/api/sessions/{SESSION_ID}/messages \
 - **Python double-fork 启动**（不是 `--daemonize`，不是 `nohup &`）：
 
 ```python
+# NANOBOT_DIR 和 NANOBOT_BIN 通过 `which nanobot` 自动推断
 python3 -c "
-import os, sys
+import os, sys, shutil
+nanobot_bin = shutil.which('nanobot')
+nanobot_dir = os.path.dirname(os.path.dirname(os.path.dirname(nanobot_bin)))
 pid = os.fork()
 if pid > 0:
     print(f'Daemon forked, first child pid={pid}')
@@ -81,13 +84,13 @@ os.setsid()
 pid2 = os.fork()
 if pid2 > 0:
     sys.exit(0)
-os.chdir('/Users/zhangxingcheng/Documents/code/workspace/nanobot')
+os.chdir(nanobot_dir)
 with open('/tmp/nanobot-gateway.log', 'a') as log:
     os.dup2(log.fileno(), 1)
     os.dup2(log.fileno(), 2)
 with open('/dev/null', 'r') as devnull:
     os.dup2(devnull.fileno(), 0)
-os.execv('./venv311/bin/nanobot', ['nanobot', 'gateway'])
+os.execv(nanobot_bin, ['nanobot', 'gateway'])
 "
 ```
 
