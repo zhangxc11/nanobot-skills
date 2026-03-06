@@ -1,32 +1,24 @@
 #!/bin/bash
-# restart_gateway.sh — 通过 web-chat HTTP API 触发 gateway 重启
+# restart_gateway.sh — 通过 web-chat worker API 触发 gateway 重启
 #
 # 原理：
-#   1. 创建一个临时 web-chat session
-#   2. 向该 session 发送重启指令（message）
+#   1. 获取当前 gateway PID
+#   2. 直接向 worker execute-stream 发送重启指令（自定义 session_key）
 #   3. web-chat worker（独立进程）执行 agent，agent 会 kill 旧 gateway 并用 double-fork 启动新的
 #
 # 用法：
 #   bash restart_gateway.sh [webserver_port]
 #
-# 默认 webserver 端口: 8081
+# 默认 webserver 端口: 8081, worker 端口: 8082
 
 set -e
 
 WEBSERVER_PORT="${1:-8081}"
+WORKER_PORT="${2:-8082}"
 WEBSERVER_URL="http://127.0.0.1:${WEBSERVER_PORT}"
+WORKER_URL="http://127.0.0.1:${WORKER_PORT}"
 
-# Auto-detect nanobot installation directory from `which nanobot`
-NANOBOT_BIN=$(which nanobot 2>/dev/null)
-if [ -z "$NANOBOT_BIN" ]; then
-    echo "❌ Error: nanobot not found in PATH"
-    exit 1
-fi
-NANOBOT_BINDIR=$(cd "$(dirname "$NANOBOT_BIN")" && pwd)
-NANOBOT_DIR=$(cd "$NANOBOT_BINDIR/../.." && pwd)
-
-echo "=== Restart Gateway via Web-Chat API ==="
-echo "Webserver URL: ${WEBSERVER_URL}"
+echo "=== Restart Gateway via Web-Chat Worker API ==="
 
 # Step 0: 检查 webserver 是否可达
 HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" "${WEBSERVER_URL}/api/health" 2>/dev/null || echo "000")
@@ -44,31 +36,16 @@ else
     echo "📌 Current gateway PID: ${GATEWAY_PID}"
 fi
 
-# Step 2: 创建临时 session
-echo "📝 Creating temporary web-chat session..."
-SESSION_RESPONSE=$(curl -s -X POST "${WEBSERVER_URL}/api/sessions" \
-    -H "Content-Type: application/json" \
-    -d '{"name": "restart-gateway-auto"}')
+# Step 2: 构造 session_key 和重启指令
+TIMESTAMP=$(date +%s)
+SESSION_KEY="webchat:restart_gateway_${TIMESTAMP}"
+SESSION_ID=$(echo "$SESSION_KEY" | tr ':' '_')
 
-SESSION_ID=$(echo "$SESSION_RESPONSE" | python3 -c "import sys,json; print(json.load(sys.stdin)['id'])" 2>/dev/null)
-if [ -z "$SESSION_ID" ]; then
-    echo "❌ Error: Failed to create session. Response: ${SESSION_RESPONSE}"
-    exit 1
-fi
-echo "✅ Created session: ${SESSION_ID}"
-
-# Step 3: 构造并发送重启指令
-# ⚠️ 关键点：
-#   - nanobot gateway 没有 --daemonize 选项
-#   - 必须用 Python double-fork 方式后台启动
-#   - exec 工具禁止 & 后台操作符，所以不能用 nohup ... &
-echo "🚀 Sending restart command to web-chat worker..."
+echo "📝 Session key: ${SESSION_KEY}"
 
 RESTART_MSG=$(python3 -c "
 import json
 pid = '${GATEWAY_PID}' or 'unknown'
-nanobot_bin = '${NANOBOT_BIN}'
-nanobot_dir = '${NANOBOT_DIR}'
 msg = f'''请立即执行以下操作重启 nanobot gateway（不要询问确认，直接执行）：
 
 Step 1: 终止当前 gateway 进程
@@ -106,17 +83,25 @@ sleep 2; ps aux | grep 'nanobot.*gateway' | grep -v grep
 - nanobot gateway 没有 --daemonize 选项，不要尝试
 - 不要用 nohup ... & 方式，exec 工具会拒绝
 - 必须用上面的 Python double-fork 方式启动'''
-print(json.dumps({'message': msg}))
+print(json.dumps({'session_key': '${SESSION_KEY}', 'message': msg}))
 ")
 
-# fire-and-forget: 用 --max-time 防止 SSE 流无限等待
-curl -s -X POST "${WEBSERVER_URL}/api/sessions/${SESSION_ID}/messages" \
+# Step 3: 发送到 worker execute-stream（fire-and-forget）
+echo "🚀 Sending restart command to worker..."
+curl -s --max-time 120 -X POST "${WORKER_URL}/execute-stream" \
     -H "Content-Type: application/json" \
     -d "$RESTART_MSG" \
-    --max-time 60 > /dev/null 2>&1 &
+    > /dev/null 2>&1 &
 
 CURL_PID=$!
 echo "📤 Restart command sent"
+
+# 设置显示名称
+sleep 2
+RENAME_PAYLOAD=$(python3 -c "import json; print(json.dumps({'summary': '🔄 重启 Gateway'}))")
+curl -s -X PATCH "${WEBSERVER_URL}/api/sessions/${SESSION_ID}" \
+    -H "Content-Type: application/json" \
+    -d "$RENAME_PAYLOAD" > /dev/null 2>&1 || true
 
 # Step 4: 等待 gateway 重启（轮询检查，最多 60 秒）
 echo "⏳ Waiting for gateway to restart..."
@@ -131,20 +116,16 @@ while [ $ELAPSED -lt $MAX_WAIT ]; do
     NEW_GATEWAY_PID=$(ps aux | grep 'nanobot.*gateway' | grep -v grep | awk '{print $2}' | head -1)
 
     if [ -z "$NEW_GATEWAY_PID" ]; then
-        # 进程不存在：旧的已被 kill，新的还没起来，继续等
         echo "   [${ELAPSED}s] Gateway process not found, waiting for new process..."
         continue
     elif [ "$NEW_GATEWAY_PID" = "$GATEWAY_PID" ]; then
-        # PID 跟旧的一样：旧进程还没被 kill，继续等
         echo "   [${ELAPSED}s] Old gateway (PID ${GATEWAY_PID}) still running, waiting..."
         continue
     else
-        # PID 不同且不为空：新进程已启动！
         echo "✅ Gateway restarted successfully!"
         echo "   Old PID: ${GATEWAY_PID:-unknown}"
         echo "   New PID: ${NEW_GATEWAY_PID}"
         echo "   Took ~${ELAPSED}s"
-        # 清理
         kill $CURL_PID 2>/dev/null || true
         exit 0
     fi
@@ -154,11 +135,9 @@ done
 NEW_GATEWAY_PID=$(ps aux | grep 'nanobot.*gateway' | grep -v grep | awk '{print $2}' | head -1)
 if [ -z "$NEW_GATEWAY_PID" ]; then
     echo "❌ Gateway did not restart within ${MAX_WAIT} seconds"
-    echo "   Check web-chat worker logs: /tmp/nanobot-worker.log"
     exit 1
 elif [ "$NEW_GATEWAY_PID" = "$GATEWAY_PID" ]; then
     echo "❌ Gateway PID unchanged (${NEW_GATEWAY_PID}) after ${MAX_WAIT}s — restart may have failed"
-    echo "   Check web-chat worker logs: /tmp/nanobot-worker.log"
     exit 1
 else
     echo "✅ Gateway restarted successfully (detected at timeout check)!"
@@ -166,5 +145,4 @@ else
     echo "   New PID: ${NEW_GATEWAY_PID}"
 fi
 
-# 清理
 kill $CURL_PID 2>/dev/null || true
