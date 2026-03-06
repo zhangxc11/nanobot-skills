@@ -1,11 +1,12 @@
 # nanobot-skills
 
-nanobot 辅助 skill 集合，提供开发工作流规范和服务管理能力。
+nanobot 辅助 skill 集合，提供开发工作流规范、服务管理和批量任务编排能力。
 
 ## 包含的 Skills
 
 | Skill | 说明 |
 |-------|------|
+| **batch-orchestrator** | 通用批工作调度框架（准备→主控→调度→Worker 四层编排） |
 | **dev-workflow** | 软件开发工作流规范（文档先行、任务拆解、Git 管理） |
 | **restart-gateway** | nanobot gateway 重启指南（区分 gateway channel 间接重启 vs web/cli 直接重启） |
 | **restart-webchat** | nanobot web-chat 服务重启 |
@@ -23,6 +24,7 @@ git clone git@github.com:zhangxc11/nanobot-skills.git _nanobot-skills
 
 # 在 skills 目录创建软链接
 cd skills
+ln -s ../_nanobot-skills/batch-orchestrator batch-orchestrator
 ln -s ../_nanobot-skills/dev-workflow dev-workflow
 ln -s ../_nanobot-skills/restart-gateway restart-gateway
 ln -s ../_nanobot-skills/restart-webchat restart-webchat
@@ -40,11 +42,13 @@ cd ~/.nanobot/workspace/_nanobot-skills && git pull
 ```
 ~/.nanobot/workspace/
 ├── _nanobot-skills/           # 本仓库（克隆到此处）
+│   ├── batch-orchestrator/
 │   ├── dev-workflow/
 │   ├── restart-gateway/
 │   ├── restart-webchat/
 │   └── web-subsession/
 └── skills/
+    ├── batch-orchestrator/    # → ../_nanobot-skills/batch-orchestrator
     ├── dev-workflow/          # → ../_nanobot-skills/dev-workflow
     ├── restart-gateway/       # → ../_nanobot-skills/restart-gateway
     ├── restart-webchat/       # → ../_nanobot-skills/restart-webchat

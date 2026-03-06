@@ -23,19 +23,11 @@ description: 通过 web-chat HTTP API 创建子 session 并发送任务。适用
 
 ## Session Key 命名规范
 
-### 前端辨识规则
+### ⚠️ 父子命名规则（强制要求）
 
-Web-chat 前端通过 session_key 格式自动分组：
+通过路径 A 创建的子 session，**必须**在 session_key 中包含父 session 引用，以建立父子关系。
 
-| session_key 格式 | 前端归类 | 说明 |
-|-----------------|---------|------|
-| `webchat:<纯数字>` | 手动对话 | 如 `webchat:1772696251`（用户手动创建） |
-| `webchat:<含非数字>` | 🤖 自动任务 | 如 `webchat:dispatch_xxx`（API 创建） |
-| `subagent:<parent>_<8hex>` | 🤖 子任务 | spawn persist 模式自动生成 |
-
-**规则**：`webchat:` 后面是纯数字 → 手动对话；包含非数字字符 → 自动任务子分组（默认折叠）。
-
-### 推荐命名格式
+**命名格式**：
 
 ```
 webchat:<role>_<parent_ref>_<detail>
@@ -43,34 +35,50 @@ webchat:<role>_<parent_ref>_<detail>
 
 | 字段 | 说明 | 示例 |
 |------|------|------|
-| `role` | 角色标识 | `dispatch`, `worker`, `review`, `fix`, `restart` |
-| `parent_ref` | 父 session 引用（通常是主 session 的 timestamp） | `1772696251` |
-| `detail` | 具体任务标识 | `gen2`, `B8`, `task001` |
+| `role` | 角色标识 | `dispatch`, `worker`, `fix`, `restart` |
+| `parent_ref` | 父 session 的 timestamp（从父 session_key 中提取） | `1772696251` |
+| `detail` | 具体任务标识 | `gen1`, `task003`, `gateway` |
 
-### 实际用例参照
+**示例**：假设主 session 是 `webchat:1772696251`
 
-**批量测例构造**（batch_build）：
-
-| 角色 | session_key | 显示名称 |
-|------|------------|---------|
-| 主 session | `webchat:1772696251` | （用户自然创建） |
-| 调度 | `webchat:dispatch_1772696251_gen2` | `🔄 调度 gen2 ← 批量测例构造` |
-| Worker | `webchat:worker_1772696251_B8` | `🔨 构造 B8: Analytics DB session_key 修复` |
-| Review | `webchat:review_1772696251_A6` | `📋 确认 A6 ← 批量测例构造` |
-
-**QA R2 修复**（qa_r2_fix）：
-
-| 角色 | session_key | 显示名称 |
-|------|------------|---------|
-| 调度 | `webchat:qa_r2_dispatch` | `🔄 QA-R2 调度` |
-| Worker | `webchat:qa_r2_fix_task001` | `🔧 修复 task-001: xxx` |
-
-**单次任务**（重启、review 等）：
-
-| 用途 | session_key | 说明 |
+| 角色 | session_key | 说明 |
 |------|------------|------|
-| 重启 gateway | `webchat:restart_gateway_auto` | 一次性任务 |
-| 代码审查 | `webchat:review_frontend` | — |
+| 主 session | `webchat:1772696251` | 用户手动创建 |
+| 调度 | `webchat:dispatch_1772696251_gen1` | 第 1 代调度 |
+| Worker | `webchat:worker_1772696251_task003` | 执行 task-003 |
+| 修复 | `webchat:fix_1772696251_task010` | 修复 task-010 |
+
+**多层嵌套**：如果调度 session 启动的 Worker 需要进一步创建子 session，parent_ref 仍然使用**根 session 的 timestamp**，保持扁平化管理。
+
+### 父子关系识别
+
+前端通过启发式规则**自动识别**父子关系，无需手动注册：
+
+- `webchat:<role>_<10位timestamp>_<detail>` → 提取 timestamp → 在所有已加载 session 中搜索以 `:<timestamp>` 结尾的 session 作为父节点
+- **支持跨通道**：父 session 可以是 `webchat:xxx`、`cli:xxx`、`feishu.lab:xxx` 等任意通道
+- 例：`webchat:dispatch_1772603563_gen1` 自动识别父 session 为 `cli:1772603563`（如果该 session 存在）
+
+**前提**：命名必须严格遵循上述格式，timestamp 必须是 10 位数字且对应真实存在的父 session。
+
+> 如果启发式规则无法覆盖（如命名不规范的历史 session），可通过 `PUT /api/sessions/parents` 手动注册作为兜底。
+
+### 前端辨识规则
+
+Web-chat 前端通过 session_key 格式自动分组：
+
+| session_key 格式 | 前端归类 | 说明 |
+|-----------------|---------|------|
+| `webchat:<纯数字>` | 手动对话 | 如 `webchat:1772696251`（用户手动创建） |
+| `webchat:<含非数字>` | 🤖 自动任务 | 如 `webchat:dispatch_1772696251_gen1`（API 创建） |
+| `subagent:<parent>_<8hex>` | 🤖 子任务 | spawn persist 模式自动生成，启发式规则自动识别父子 |
+
+### 父子关系数据源（优先级递减）
+
+1. **映射文件** `session_parents.json`：通过 `PUT /api/sessions/parents` 手动注册（兜底）
+2. **启发式规则 A**：`subagent:` 前缀自动识别（spawn persist 模式）
+3. **启发式规则 B**：`webchat:<role>_<10位timestamp>_<detail>` 自动识别，跨通道搜索父 session
+
+> 只要命名符合规范，父子关系**自动生效**，支持跨通道（webchat/cli/feishu 均可作为父 session）。
 
 ### 文件名映射
 
@@ -78,50 +86,42 @@ session_key 中的 `:` 自动替换为 `_` 作为文件名：
 
 ```
 sessions/
-├── webchat_1772696251.jsonl                      # 主 session（手动）
-├── webchat_dispatch_1772696251_gen2.jsonl         # 调度
-├── webchat_worker_1772696251_B8.jsonl             # worker
+├── webchat_1772696251.jsonl                        # 主 session
+├── webchat_dispatch_1772696251_gen1.jsonl           # 调度
+├── webchat_worker_1772696251_task003.jsonl          # Worker
 ```
-
-### 父子关系
-
-前端 Phase 42 支持树形父子展示，数据源优先级：
-1. **手动标注**：`session_parents.json`（`{ "子key": "父key" }` 映射）
-2. **启发式规则**：`subagent:{parent_sanitized}_{8hex}` 自动提取 parent
-
-> `webchat:` 前缀的子 session 目前需要通过 `session_parents.json` 手动标注父子关系。
 
 ## 使用方式
 
-有两种 API 路径，适用于不同场景：
+### 路径 A：直接调用 Worker API（推荐，强制命名规则）
 
-### 路径 A：直接调用 Worker API（推荐用于批量调度）
-
-直接向 worker (端口 8082) 发送 `execute-stream` 请求，可**自定义 session_key**：
+直接向 worker (端口 8082) 发送 `execute-stream` 请求，**自定义 session_key**：
 
 ```bash
+# 1. 启动子 session（fire-and-forget）
 curl -s --max-time 5 -X POST http://localhost:8082/execute-stream \
   -H "Content-Type: application/json" \
-  -d '{"session_key": "webchat:worker_1772696251_B8", "message": "请执行..."}' \
+  -d '{"session_key": "webchat:worker_1772696251_task003", "message": "请执行..."}' \
   > /dev/null 2>&1 || true
+
+# 2. 设置显示名称（等 session 文件创建后）
+sleep 2
+SESSION_ID="webchat_worker_1772696251_task003"
+curl -s -X PATCH "http://localhost:8081/api/sessions/${SESSION_ID}" \
+  -H "Content-Type: application/json" \
+  -d '{"summary": "🔨 构造 task-003"}'
+
+# 父子关系由前端启发式规则自动识别，无需手动注册
 ```
 
 **特点**：
-- 可完全控制 session_key（符合命名规范）
-- `--max-time 5` 让 curl 超时退出，但 worker 已接收任务会继续执行（fire-and-forget）
-- 启动后可通过 webserver rename API 设置显示名称：
+- 可完全控制 session_key（必须符合命名规范）
+- `--max-time 5` 让 curl 超时退出，但 worker 已接收任务会继续执行
+- 必须注册父子关系
 
-```bash
-sleep 2  # 等 session 文件创建
-SESSION_ID=$(echo "webchat:worker_1772696251_B8" | tr ':' '_')
-curl -s -X PATCH "http://localhost:8081/api/sessions/${SESSION_ID}" \
-  -H "Content-Type: application/json" \
-  -d '{"summary": "🔨 构造 B8: Analytics DB session_key 修复"}'
-```
+### 路径 B：通过 Webserver API（仅限特殊场景）
 
-### 路径 B：通过 Webserver API（适用于单次任务）
-
-先通过 webserver (端口 8081) 创建 session，再发送消息。session_key 自动生成为 `webchat:{timestamp}`：
+先通过 webserver (端口 8081) 创建 session，再发送消息。session_key 自动生成为 `webchat:{timestamp}`（纯数字）。
 
 ```bash
 # Step 1: 创建 session
@@ -130,27 +130,25 @@ SESSION_RESPONSE=$(curl -s -X POST http://127.0.0.1:8081/api/sessions \
   -d '{"name": "my-task"}')
 SESSION_ID=$(echo "$SESSION_RESPONSE" | python3 -c "import sys,json; print(json.load(sys.stdin)['id'])")
 
-# Step 2: 发送消息（--max-time 防止 SSE 流无限等待）
+# Step 2: 发送消息
 curl -s -X POST "http://127.0.0.1:8081/api/sessions/${SESSION_ID}/messages" \
   -H "Content-Type: application/json" \
   -d '{"message": "你的任务指令..."}' \
   --max-time 120 > /dev/null 2>&1 &
 ```
 
-> ⚠️ 路径 B 生成的 session_key 是 `webchat:{timestamp}`（纯数字），前端会归类为手动对话而非自动任务。如需归入自动任务分组，请使用路径 A。
+> ⚠️ 路径 B 无法自定义 session_key，生成的 `webchat:{timestamp}` 会被前端归类为手动对话。仅在不需要父子关系的一次性任务（如 restart-gateway 脚本）中使用。
 
 ### 脚本工具
 
-提供了封装脚本，支持两种路径：
-
 ```bash
-# 路径 A：自定义 session_key（直接调用 worker）
+# 路径 A：自定义 session_key（命名符合规范即自动建立父子关系）
 bash ~/.nanobot/workspace/skills/web-subsession/scripts/create_subsession.sh \
-  --session-key "webchat:worker_1772696251_B8" \
+  --session-key "webchat:worker_1772696251_task003" \
   --message "请执行..." \
-  --title "🔨 构造 B8: xxx"
+  --title "🔨 构造 task-003"
 
-# 路径 B：自动生成 session_key（通过 webserver）
+# 路径 B：自动生成 session_key（特殊场景，无父子关系）
 bash ~/.nanobot/workspace/skills/web-subsession/scripts/create_subsession.sh \
   --message "请执行..." \
   --wait 60
@@ -160,9 +158,9 @@ bash ~/.nanobot/workspace/skills/web-subsession/scripts/create_subsession.sh \
 
 | 参数 | 必填 | 说明 |
 |------|------|------|
-| `--session-key` | 否 | 自定义 session_key（使用路径 A）。不指定则使用路径 B |
+| `--session-key` | 路径 A 必填 | 自定义 session_key（必须符合命名规范） |
 | `--message` | 是 | 发送给子 session 的任务指令 |
-| `--title` | 否 | 显示名称（仅路径 A 有效，设置后通过 rename API 更新） |
+| `--title` | 否 | 显示名称（路径 A 有效） |
 | `--port` | 否 | Webserver 端口（默认 8081） |
 | `--worker-port` | 否 | Worker 端口（默认 8082，仅路径 A） |
 | `--wait` | 否 | 等待完成的超时秒数（默认 0 = fire-and-forget） |
@@ -180,5 +178,21 @@ bash ~/.nanobot/workspace/skills/web-subsession/scripts/create_subsession.sh \
 
 | Skill | 关系 |
 |-------|------|
-| **restart-gateway** | 飞书/Telegram channel 下，restart-gateway 脚本内部使用路径 B 创建子 session 委托 worker 执行重启 |
-| **restart-webchat** | 不需要子 session，restart.sh 使用 double-fork 可以直接执行 |
+| **batch-orchestrator** | 批量调度框架，调度 session 和 Worker session 通过本 skill 的路径 A 创建，必须遵循命名规范 |
+| **restart-gateway** | 飞书/Telegram channel 下，restart-gateway 脚本使用路径 B 创建子 session（一次性任务，无需父子关系） |
+| **restart-webchat** | 不需要子 session，restart.sh 使用 double-fork 直接执行 |
+
+## 跨通道使用（CLI / 飞书 → webchat 子 session）
+
+从 CLI 或飞书通道发起 batch 任务时，子 session 的 parent_ref 使用**父 session 的 timestamp**（即 session_key 中的 10 位数字部分）。
+
+前端启发式规则 B 会在所有已加载 session 中搜索以 `:<timestamp>` 结尾的 session，**自动跨通道匹配**。
+
+**示例**：从 `cli:1772603563` 发起 batch
+
+| 角色 | session_key | 自动识别的父 session |
+|------|------------|-------------------|
+| 调度 | `webchat:dispatch_1772603563_gen1` | `cli:1772603563` |
+| Worker | `webchat:worker_1772603563_task003` | `cli:1772603563` |
+
+> **注意**：前端需要同时加载了父 session（如 `cli:1772603563`）才能匹配。如果父 session 不在当前 session 列表中（如已归档），则回退为根节点显示。
