@@ -32,14 +32,17 @@ description: 通用批工作调度框架。将可并行的任务拆解为 Worker
      │  用户手动创建新 session，粘贴 MASTER_PROMPT
      ▼
 主控 session ─── 业务逻辑、决策、处理调度 session 级异常
+     │              session_key: webchat:<主控ts>
      │
      │  通过 web-subsession 启动
      ▼
 调度 session ─── 任务执行管理：启动 Worker、轮询、状态更新、Worker 异常恢复
+     │              session_key: webchat:dispatch_<主控ts>_<调度ts>
      │
      │  通过 web-subsession 启动（每个 Worker 一个）
      ▼
 Worker session ── 执行单个子任务，写 result 文件
+                    session_key: webchat:worker_<调度ts>_<detail>
 ```
 
 ### 职责边界
@@ -67,29 +70,68 @@ Worker 异常 → 调度 session 优先处理（发送恢复消息、标记 fail
 
 ### ⚠️ 命名规则（强制要求）
 
-通过 `web-subsession` 路径 A 创建的所有子 session，**必须**遵循命名规则。前端启发式规则会自动识别父子关系。
+通过 `web-subsession` 路径 A 创建的所有子 session，**必须**遵循命名规则。前端启发式规则会自动识别三级树状父子关系。
+
+### 三级树状结构
+
+batch-orchestrator 场景下，session 形成三级树：**主控 → 调度 → Worker**。
+
+```
+主控 session (webchat:1772696251)
+├── 调度 gen1 (webchat:dispatch_1772696251_<调度ts1>)
+│   ├── Worker task003 (webchat:worker_<调度ts1>_task003)
+│   └── Worker task005 (webchat:worker_<调度ts1>_task005)
+└── 调度 gen2 (webchat:dispatch_1772696251_<调度ts2>)
+    ├── Worker task017 (webchat:worker_<调度ts2>_task017)
+    └── Worker task020 (webchat:worker_<调度ts2>_task020)
+```
 
 ### 命名格式
 
+#### 调度 session
+
 ```
-webchat:<role>_<parent_ref>_<detail>
+webchat:dispatch_<主控ts>_<调度自身ts>
 ```
 
-- `parent_ref`：主控 session 的 timestamp（如 `1772696251`）
-- 所有层级（调度、Worker）都使用**同一个 parent_ref**，保持扁平化
+- `主控ts`：主控 session 的 timestamp（如 `1772696251`）
+- `调度自身ts`：创建调度 session 时的当前 Unix timestamp（`date +%s`）
 
-### 批量调度命名示例
+**示例**：`webchat:dispatch_1772696251_1772700001`
 
-假设主控 session 是 `webchat:1772696251`：
+#### Worker session
 
-| 角色 | session_key | 自动识别的父 session |
-|------|------------|-------------------|
-| 调度 gen1 | `webchat:dispatch_1772696251_gen1` | `webchat:1772696251` |
-| 调度 gen2 | `webchat:dispatch_1772696251_gen2` | `webchat:1772696251` |
-| Worker | `webchat:worker_1772696251_task003` | `webchat:1772696251` |
-| Worker | `webchat:worker_1772696251_task017` | `webchat:1772696251` |
+```
+webchat:worker_<调度ts>_<detail>
+```
 
-> 父子关系由前端启发式规则自动识别（从 session_key 中提取 10 位 timestamp），无需手动注册。
+- `调度ts`：**调度 session 的自身 timestamp**（不是主控的！）
+- `detail`：具体任务标识（如 `task003`）
+
+**示例**：`webchat:worker_1772700001_task003`
+
+### 父子关系自动识别
+
+| 角色 | session_key | 启发式匹配 | 父 session |
+|------|------------|-----------|-----------|
+| 主控 | `webchat:1772696251` | —（根节点） | — |
+| 调度 gen1 | `webchat:dispatch_1772696251_1772700001` | 提取 `1772696251` → 精确匹配 `:1772696251` | `webchat:1772696251` |
+| 调度 gen2 | `webchat:dispatch_1772696251_1772700500` | 提取 `1772696251` → 精确匹配 `:1772696251` | `webchat:1772696251` |
+| Worker | `webchat:worker_1772700001_task003` | 提取 `1772700001` → 精确无匹配 → 后缀匹配 `_1772700001` | `webchat:dispatch_1772696251_1772700001` |
+| Worker | `webchat:worker_1772700500_task017` | 提取 `1772700500` → 精确无匹配 → 后缀匹配 `_1772700500` | `webchat:dispatch_1772696251_1772700500` |
+
+> 父子关系由前端启发式规则自动识别（三级树），无需手动注册。
+
+### 调度 session 创建时的 timestamp 生成
+
+调度 session 在创建时需要生成自己的 timestamp：
+
+```bash
+# 在主控 session 或调度 session 中
+MASTER_TS="1772696251"  # 从主控 session_key 中提取
+DISPATCH_TS=$(date +%s)  # 当前 Unix timestamp
+SESSION_KEY="webchat:dispatch_${MASTER_TS}_${DISPATCH_TS}"
+```
 
 ---
 
@@ -109,7 +151,7 @@ webchat:<role>_<parent_ref>_<detail>
 
 ### 跨通道使用（CLI / 飞书发起 batch）
 
-从 CLI 或飞书通道发起 batch 时，子 session 的 parent_ref 使用父 session 的 timestamp。前端启发式规则 B 自动跨通道匹配父 session（如 `cli:xxx`、`feishu.lab:xxx`）。详见 `web-subsession` skill 的"跨通道使用"章节。
+从 CLI 或飞书通道发起 batch 时，子 session 的 parent_ref 使用直接父 session 的 timestamp。前端启发式规则 B 自动跨通道匹配父 session（精确匹配 `:<ts>` 或后缀匹配 `_<ts>`）。详见 `web-subsession` skill 的"跨通道使用"章节。
 
 ---
 

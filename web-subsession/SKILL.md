@@ -36,27 +36,73 @@ webchat:<role>_<parent_ref>_<detail>
 | 字段 | 说明 | 示例 |
 |------|------|------|
 | `role` | 角色标识 | `dispatch`, `worker`, `fix`, `restart` |
-| `parent_ref` | 父 session 的 timestamp（从父 session_key 中提取） | `1772696251` |
+| `parent_ref` | **直接父 session** 的 timestamp 或唯一标识 | `1772696251`（主控 ts）或 `1772700001`（调度 ts） |
 | `detail` | 具体任务标识 | `gen1`, `task003`, `gateway` |
 
-**示例**：假设主 session 是 `webchat:1772696251`
+### 三级树状结构（batch 调度场景）
 
+batch-orchestrator 场景下，session 形成三级树：**主控 → 调度 → Worker**。
+
+**关键规则**：
+- **调度 session** 的 key 包含**两个** 10 位 timestamp：`<主控ts>_<调度自身ts>`
+- **Worker session** 的 parent_ref 使用**调度 session 的 timestamp**（而非主控的）
+- 前端启发式规则自动识别三级树（详见下方"父子关系识别"章节）
+
+**示例**：假设主控 session 是 `webchat:1772696251`，调度在 ts=1772700001 时创建
+
+| 角色 | session_key | 自动识别的父 session |
+|------|------------|-------------------|
+| 主控 | `webchat:1772696251` | —（根节点） |
+| 调度 gen1 | `webchat:dispatch_1772696251_1772700001` | `webchat:1772696251`（提取第一个 ts） |
+| 调度 gen2 | `webchat:dispatch_1772696251_1772700500` | `webchat:1772696251`（提取第一个 ts） |
+| Worker | `webchat:worker_1772700001_task003` | `webchat:dispatch_1772696251_1772700001`（提取 ts → 匹配 `_1772700001` 结尾） |
+| Worker | `webchat:worker_1772700500_task017` | `webchat:dispatch_1772696251_1772700500`（提取 ts → 匹配 `_1772700500` 结尾） |
+
+**树形结构**：
+```
+webchat:1772696251 (主控)
+├── webchat:dispatch_1772696251_1772700001 (调度 gen1)
+│   ├── webchat:worker_1772700001_task003
+│   └── webchat:worker_1772700001_task005
+└── webchat:dispatch_1772696251_1772700500 (调度 gen2)
+    ├── webchat:worker_1772700500_task017
+    └── webchat:worker_1772700500_task020
+```
+
+### 调度 session key 中的 timestamp 生成
+
+调度 session 的第二个 timestamp 应在创建时生成（取当前 Unix timestamp）：
+
+```bash
+DISPATCH_TS=$(date +%s)
+SESSION_KEY="webchat:dispatch_${MASTER_TS}_${DISPATCH_TS}"
+```
+
+### 扁平场景（非 batch）
+
+对于简单的一级子 session（如重启、修复），仍然使用单 timestamp 格式：
+
+```
+webchat:<role>_<parent_ref>_<detail>
+```
+
+**示例**：
 | 角色 | session_key | 说明 |
 |------|------------|------|
-| 主 session | `webchat:1772696251` | 用户手动创建 |
-| 调度 | `webchat:dispatch_1772696251_gen1` | 第 1 代调度 |
-| Worker | `webchat:worker_1772696251_task003` | 执行 task-003 |
-| 修复 | `webchat:fix_1772696251_task010` | 修复 task-010 |
-
-**多层嵌套**：如果调度 session 启动的 Worker 需要进一步创建子 session，parent_ref 仍然使用**根 session 的 timestamp**，保持扁平化管理。
+| 修复 | `webchat:fix_1772696251_task010` | 直接挂在主控下 |
+| 重启 | `webchat:restart_1772696251_gateway` | 直接挂在主控下 |
 
 ### 父子关系识别
 
 前端通过启发式规则**自动识别**父子关系，无需手动注册：
 
-- `webchat:<role>_<10位timestamp>_<detail>` → 提取 timestamp → 在所有已加载 session 中搜索以 `:<timestamp>` 结尾的 session 作为父节点
-- **支持跨通道**：父 session 可以是 `webchat:xxx`、`cli:xxx`、`feishu.lab:xxx` 等任意通道
-- 例：`webchat:dispatch_1772603563_gen1` 自动识别父 session 为 `cli:1772603563`（如果该 session 存在）
+**启发式规则 B**（`webchat:<role>_<10位timestamp>_<detail>`）：
+1. 提取 session_key 中**第一个** 10 位 timestamp 作为 parent_ref
+2. **优先搜索**：在所有 session 中找以 `:<parent_ref>` 结尾的 session（精确匹配，如 `webchat:1772696251`、`cli:1772696251`）
+3. **备选搜索**：如果精确匹配无结果，搜索以 `_<parent_ref>` 结尾的 session（后缀匹配，如 `webchat:dispatch_1772696251_1772700001`）
+4. 精确匹配用于"子 session → 根 session"关系；后缀匹配用于"Worker → 调度 session"关系
+
+**支持跨通道**：父 session 可以是 `webchat:xxx`、`cli:xxx`、`feishu.lab:xxx` 等任意通道。
 
 **前提**：命名必须严格遵循上述格式，timestamp 必须是 10 位数字且对应真实存在的父 session。
 
@@ -69,16 +115,18 @@ Web-chat 前端通过 session_key 格式自动分组：
 | session_key 格式 | 前端归类 | 说明 |
 |-----------------|---------|------|
 | `webchat:<纯数字>` | 手动对话 | 如 `webchat:1772696251`（用户手动创建） |
-| `webchat:<含非数字>` | 🤖 自动任务 | 如 `webchat:dispatch_1772696251_gen1`（API 创建） |
+| `webchat:<含非数字>` | 🤖 自动任务 | 如 `webchat:dispatch_1772696251_1772700001`（API 创建） |
 | `subagent:<parent>_<8hex>` | 🤖 子任务 | spawn persist 模式自动生成，启发式规则自动识别父子 |
 
 ### 父子关系数据源（优先级递减）
 
 1. **映射文件** `session_parents.json`：通过 `PUT /api/sessions/parents` 手动注册（兜底）
 2. **启发式规则 A**：`subagent:` 前缀自动识别（spawn persist 模式）
-3. **启发式规则 B**：`webchat:<role>_<10位timestamp>_<detail>` 自动识别，跨通道搜索父 session
+3. **启发式规则 B**：`webchat:<role>_<10位timestamp>_<detail>` 自动识别
+   - 精确匹配 `endsWith(':' + ts)` — 匹配根 session
+   - 后缀匹配 `endsWith('_' + ts)` — 匹配调度等中间层 session（三级树）
 
-> 只要命名符合规范，父子关系**自动生效**，支持跨通道（webchat/cli/feishu 均可作为父 session）。
+> 只要命名符合规范，父子关系**自动生效**，支持跨通道（webchat/cli/feishu 均可作为父 session）和三级树。
 
 ### 文件名映射
 
@@ -86,9 +134,9 @@ session_key 中的 `:` 自动替换为 `_` 作为文件名：
 
 ```
 sessions/
-├── webchat_1772696251.jsonl                        # 主 session
-├── webchat_dispatch_1772696251_gen1.jsonl           # 调度
-├── webchat_worker_1772696251_task003.jsonl          # Worker
+├── webchat_1772696251.jsonl                                # 主 session
+├── webchat_dispatch_1772696251_1772700001.jsonl             # 调度（含双 timestamp）
+├── webchat_worker_1772700001_task003.jsonl                  # Worker（parent_ref 指向调度 ts）
 ```
 
 ## 使用方式
@@ -101,12 +149,12 @@ sessions/
 # 1. 启动子 session（fire-and-forget）
 curl -s --max-time 5 -X POST http://localhost:8082/execute-stream \
   -H "Content-Type: application/json" \
-  -d '{"session_key": "webchat:worker_1772696251_task003", "message": "请执行..."}' \
+  -d '{"session_key": "webchat:worker_1772700001_task003", "message": "请执行..."}' \
   > /dev/null 2>&1 || true
 
 # 2. 设置显示名称（等 session 文件创建后）
 sleep 2
-SESSION_ID="webchat_worker_1772696251_task003"
+SESSION_ID="webchat_worker_1772700001_task003"
 curl -s -X PATCH "http://localhost:8081/api/sessions/${SESSION_ID}" \
   -H "Content-Type: application/json" \
   -d '{"summary": "🔨 构造 task-003"}'
@@ -144,7 +192,7 @@ curl -s -X POST "http://127.0.0.1:8081/api/sessions/${SESSION_ID}/messages" \
 ```bash
 # 路径 A：自定义 session_key（命名符合规范即自动建立父子关系）
 bash ~/.nanobot/workspace/skills/web-subsession/scripts/create_subsession.sh \
-  --session-key "webchat:worker_1772696251_task003" \
+  --session-key "webchat:worker_1772700001_task003" \
   --message "请执行..." \
   --title "🔨 构造 task-003"
 
@@ -184,15 +232,15 @@ bash ~/.nanobot/workspace/skills/web-subsession/scripts/create_subsession.sh \
 
 ## 跨通道使用（CLI / 飞书 → webchat 子 session）
 
-从 CLI 或飞书通道发起 batch 任务时，子 session 的 parent_ref 使用**父 session 的 timestamp**（即 session_key 中的 10 位数字部分）。
+从 CLI 或飞书通道发起 batch 任务时，子 session 的 parent_ref 使用**直接父 session 的 timestamp**。
 
-前端启发式规则 B 会在所有已加载 session 中搜索以 `:<timestamp>` 结尾的 session，**自动跨通道匹配**。
+前端启发式规则 B 会在所有已加载 session 中搜索以 `:<timestamp>` 或 `_<timestamp>` 结尾的 session，**自动跨通道匹配**。
 
-**示例**：从 `cli:1772603563` 发起 batch
+**示例**：从 `cli:1772603563` 发起 batch，调度在 ts=1772700001 时创建
 
 | 角色 | session_key | 自动识别的父 session |
 |------|------------|-------------------|
-| 调度 | `webchat:dispatch_1772603563_gen1` | `cli:1772603563` |
-| Worker | `webchat:worker_1772603563_task003` | `cli:1772603563` |
+| 调度 | `webchat:dispatch_1772603563_1772700001` | `cli:1772603563`（精确匹配 `:1772603563`） |
+| Worker | `webchat:worker_1772700001_task003` | `webchat:dispatch_1772603563_1772700001`（后缀匹配 `_1772700001`） |
 
 > **注意**：前端需要同时加载了父 session（如 `cli:1772603563`）才能匹配。如果父 session 不在当前 session 列表中（如已归档），则回退为根节点显示。
