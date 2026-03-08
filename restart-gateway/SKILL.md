@@ -7,7 +7,7 @@ description: "仅限飞书/Telegram 等 gateway channel 使用：因为这些 ch
 
 > ⚠️ **本 skill 仅适用于飞书/Telegram 等 gateway channel。**
 >
-> 如果当前 channel 是 **web** 或 **cli**，**不需要此 skill**，直接执行重启命令即可（见下方「直接重启方法」）。
+> 如果当前 channel 是 **web** 或 **cli**，**不需要此 skill**，直接用 `restart_gateway_direct.sh` 即可。
 
 ## 为什么需要区分？
 
@@ -16,60 +16,28 @@ description: "仅限飞书/Telegram 等 gateway channel 使用：因为这些 ch
 | **飞书/Telegram** | gateway 进程 | ❌ 不能（kill gateway = 自杀） |
 | **web / cli** | worker 或 CLI 进程 | ✅ 可以（与 gateway 进程隔离） |
 
-## 直接重启方法（web / cli channel 使用）
-
-当前 channel 是 web 或 cli 时，**直接执行以下命令**：
+## 直接重启（web / cli channel）
 
 ```bash
-# 1. 获取 PID
-ps aux | grep 'nanobot.*gateway' | grep -v grep | awk '{print $2}'
-
-# 2. Kill 旧进程
-kill <PID>
-sleep 2
-
-# 3. Python double-fork 后台启动新 gateway
-python3 -c "
-import os, sys, shutil
-nanobot_bin = shutil.which('nanobot')
-nanobot_dir = os.path.dirname(os.path.dirname(os.path.dirname(nanobot_bin)))
-pid = os.fork()
-if pid > 0:
-    print(f'Daemon forked, first child pid={pid}')
-    sys.exit(0)
-os.setsid()
-pid2 = os.fork()
-if pid2 > 0:
-    sys.exit(0)
-os.chdir(nanobot_dir)
-with open('/tmp/nanobot-gateway.log', 'a') as log:
-    os.dup2(log.fileno(), 1)
-    os.dup2(log.fileno(), 2)
-with open('/dev/null', 'r') as devnull:
-    os.dup2(devnull.fileno(), 0)
-os.execv(nanobot_bin, ['nanobot', 'gateway'])
-"
-
-# 4. 验证
-sleep 2
-ps aux | grep 'nanobot.*gateway' | grep -v grep
+bash ~/.nanobot/workspace/skills/restart-gateway/scripts/restart_gateway_direct.sh restart
+bash ~/.nanobot/workspace/skills/restart-gateway/scripts/restart_gateway_direct.sh stop
+bash ~/.nanobot/workspace/skills/restart-gateway/scripts/restart_gateway_direct.sh status
 ```
 
-## 间接重启方法（飞书/Telegram channel 专用）
+功能：
+- **健壮进程发现**：`pgrep -f "nanobot gateway"` + 过滤确认是 Python 进程
+- **SIGTERM → SIGKILL 兜底**：2 秒后强制 kill
+- **Python double-fork 后台启动**：不依赖 `&` 或 `nohup`
+- **启动验证**：等待进程存活 ≥3 秒确认稳定（非立即崩溃），最长等 15 秒
+- **日志**：`/tmp/nanobot-gateway.log`（append 模式）
 
-飞书/Telegram channel 的 agent 运行在 gateway 进程内，必须委托 web-chat worker 代为执行。
-
-### 使用脚本（推荐）
+## 间接重启（飞书/Telegram channel 专用）
 
 ```bash
 bash ~/.nanobot/workspace/skills/restart-gateway/scripts/restart_gateway.sh
 ```
 
-脚本自动完成：创建临时 web-chat 子 session → 发送重启指令 → 子 session 的 agent（运行在 worker 进程中）执行 kill + 重启 → 验证成功。
-
-### 手动分步
-
-参考 `web-subsession` skill 创建子 session 并发送重启指令。
+原理：创建 web-chat 子 session → agent 在 worker 进程中执行 `restart_gateway_direct.sh` → 轮询验证 PID 变更。
 
 ## ⚠️ 技术要点
 
