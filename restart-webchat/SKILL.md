@@ -21,8 +21,8 @@ Web Chat 由两个独立进程组成：
 |------|------|
 | 服务目录 | `~/.nanobot/workspace/web-chat/` |
 | 重启脚本 | `~/.nanobot/workspace/web-chat/restart.sh` |
-| Webserver 日志 | `/tmp/nanobot-webserver.log` |
-| Worker 日志 | `/tmp/nanobot-worker.log` |
+| Webserver 日志 | `~/.nanobot/logs/webserver.log` |
+| Worker 日志 | `~/.nanobot/logs/worker.log` |
 | 前端源码 | `~/.nanobot/workspace/web-chat/frontend/` |
 | 前端构建产物 | `~/.nanobot/workspace/web-chat/frontend/dist/` |
 
@@ -88,8 +88,8 @@ bash ~/.nanobot/workspace/web-chat/restart.sh webserver
 
 ```bash
 # Webserver 日志
-tail -50 /tmp/nanobot-webserver.log
+tail -50 ~/.nanobot/logs/webserver.log
 
 # Worker 日志
-tail -50 /tmp/nanobot-worker.log
+tail -50 ~/.nanobot/logs/worker.log
 ```

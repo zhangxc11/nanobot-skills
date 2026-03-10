@@ -11,7 +11,9 @@
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-GATEWAY_LOG="/tmp/nanobot-gateway.log"
+GATEWAY_LOG_DIR="${HOME}/.nanobot/logs"
+mkdir -p "${GATEWAY_LOG_DIR}"
+GATEWAY_LOG="${GATEWAY_LOG_DIR}/gateway.log"
 NEW_PROCESS_MAX_AGE=15
 
 # --- Auto-detect nanobot binary ---

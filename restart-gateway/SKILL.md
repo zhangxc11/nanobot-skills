@@ -29,7 +29,7 @@ bash ~/.nanobot/workspace/skills/restart-gateway/scripts/restart_gateway_direct.
 - **SIGTERM → SIGKILL 兜底**：2 秒后强制 kill
 - **Python double-fork 后台启动**：不依赖 `&` 或 `nohup`
 - **启动验证**：等待进程存活 ≥3 秒确认稳定（非立即崩溃），最长等 15 秒
-- **日志**：`/tmp/nanobot-gateway.log`（append 模式）
+- **日志**：`~/.nanobot/logs/gateway.log`（append 模式）
 
 ## 间接重启（飞书/Telegram channel 专用）
 

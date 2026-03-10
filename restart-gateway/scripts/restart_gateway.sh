@@ -19,7 +19,9 @@ WORKER_PORT="${2:-8082}"
 WEBSERVER_URL="http://127.0.0.1:${WEBSERVER_PORT}"
 WORKER_URL="http://127.0.0.1:${WORKER_PORT}"
 NANOBOT_BIN=$(which nanobot 2>/dev/null || echo "/Users/zhangxingcheng/Documents/code/workspace/nanobot/venv311/bin/nanobot")
-GATEWAY_LOG="/tmp/nanobot-gateway.log"
+GATEWAY_LOG_DIR="${HOME}/.nanobot/logs"
+mkdir -p "${GATEWAY_LOG_DIR}"
+GATEWAY_LOG="${GATEWAY_LOG_DIR}/gateway.log"
 
 echo "=== Restart Gateway via Web-Chat Worker API ==="
 
