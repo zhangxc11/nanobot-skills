@@ -120,7 +120,7 @@ Web-chat 前端通过 session_key 格式自动分组：
 
 ### 父子关系数据源（优先级递减）
 
-1. **映射文件** `session_parents.json`：通过 `PUT /api/sessions/parents` 手动注册（兜底）
+1. **映射文件** `session_parents.json`：通过 `PUT /api/sessions/parents`（全量覆盖）或 `POST /api/sessions/parents`（单条追加）注册（兜底）
 2. **启发式规则 A**：`subagent:` 前缀自动识别（spawn persist 模式）
 3. **启发式规则 B**：`webchat:<role>_<10位timestamp>_<detail>` 自动识别
    - 精确匹配 `endsWith(':' + ts)` — 匹配根 session
@@ -194,7 +194,8 @@ curl -s -X POST "http://127.0.0.1:8081/api/sessions/${SESSION_ID}/messages" \
 bash ~/.nanobot/workspace/skills/web-subsession/scripts/create_subsession.sh \
   --session-key "webchat:worker_1772700001_task003" \
   --message "请执行..." \
-  --title "🔨 构造 task-003"
+  --title "🔨 构造 task-003" \
+  --parent "webchat_dispatch_1772696251_1772700001"
 
 # 路径 B：自动生成 session_key（特殊场景，无父子关系）
 bash ~/.nanobot/workspace/skills/web-subsession/scripts/create_subsession.sh \
@@ -209,6 +210,7 @@ bash ~/.nanobot/workspace/skills/web-subsession/scripts/create_subsession.sh \
 | `--session-key` | 路径 A 必填 | 自定义 session_key（必须符合命名规范） |
 | `--message` | 是 | 发送给子 session 的任务指令 |
 | `--title` | 否 | 显示名称（路径 A 有效） |
+| `--parent` | 否 | 父 session ID（下划线格式如 `webchat_1773170043`），注册父子关系到 session_parents.json |
 | `--port` | 否 | Webserver 端口（默认 8081） |
 | `--worker-port` | 否 | Worker 端口（默认 8082，仅路径 A） |
 | `--wait` | 否 | 等待完成的超时秒数（默认 0 = fire-and-forget） |
@@ -226,7 +228,7 @@ bash ~/.nanobot/workspace/skills/web-subsession/scripts/create_subsession.sh \
 
 | Skill | 关系 |
 |-------|------|
-| **batch-orchestrator** | 批量调度框架，调度 session 和 Worker session 通过本 skill 的路径 A 创建，必须遵循命名规范 |
+| **batch-orchestrator** | 批量调度框架，调度 session 通过本 skill 创建，使用 `--parent` 注册父子关系 |
 | **restart-gateway** | 飞书/Telegram channel 下，restart-gateway 脚本使用路径 B 创建子 session（一次性任务，无需父子关系） |
 | **restart-webchat** | 不需要子 session，restart.sh 使用 double-fork 直接执行 |
 

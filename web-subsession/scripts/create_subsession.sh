@@ -20,6 +20,7 @@
 #   --worker-port PORT   Worker 端口（默认 8082，仅路径 A）
 #   --wait SECONDS       等待完成的超时秒数（默认 0 = fire-and-forget）
 #   --poll-interval SECS 轮询间隔秒数（默认 5，仅 --wait > 0 时有效）
+#   --parent SESSION_ID  父 session ID（可选，注册父子关系到 session_parents.json）
 
 set -e
 
@@ -27,6 +28,7 @@ set -e
 SESSION_KEY=""
 MESSAGE=""
 TITLE=""
+PARENT=""
 WEBSERVER_PORT=8081
 WORKER_PORT=8082
 WAIT_TIMEOUT=0
@@ -44,6 +46,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --title)
             TITLE="$2"
+            shift 2
+            ;;
+        --parent)
+            PARENT="$2"
             shift 2
             ;;
         --port)
@@ -123,6 +129,16 @@ print(json.dumps({'session_key': '${SESSION_KEY}', 'message': msg}))
         echo "📝 Title set: ${TITLE}"
     fi
 
+    # 注册父子关系（如果指定了 --parent）
+    if [ -n "$PARENT" ]; then
+        sleep 1  # 等 session 文件创建
+        PARENT_PAYLOAD=$(python3 -c "import json; print(json.dumps({'child': '${SESSION_ID}', 'parent': '${PARENT}'}))")
+        curl -s -X POST "${WEBSERVER_URL}/api/sessions/parents" \
+            -H "Content-Type: application/json" \
+            -d "$PARENT_PAYLOAD" > /dev/null 2>&1 || true
+        echo "🔗 Parent registered: ${SESSION_ID} → ${PARENT}"
+    fi
+
 else
     # ========== 路径 B：通过 Webserver API ==========
     echo "=== Create Sub-Session (路径 B: Webserver API) ==="
@@ -157,6 +173,15 @@ print(json.dumps({'message': msg}))
         --max-time "$MAX_TIME" > /dev/null 2>&1 &
     CURL_PID=$!
     echo "✅ Message sent (curl PID: ${CURL_PID})"
+
+    # 注册父子关系（如果指定了 --parent）
+    if [ -n "$PARENT" ]; then
+        PARENT_PAYLOAD=$(python3 -c "import json; print(json.dumps({'child': '${SESSION_ID}', 'parent': '${PARENT}'}))")
+        curl -s -X POST "${WEBSERVER_URL}/api/sessions/parents" \
+            -H "Content-Type: application/json" \
+            -d "$PARENT_PAYLOAD" > /dev/null 2>&1 || true
+        echo "🔗 Parent registered: ${SESSION_ID} → ${PARENT}"
+    fi
 fi
 
 # === 等待完成（可选） ===
