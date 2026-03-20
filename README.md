@@ -1,15 +1,17 @@
 # nanobot-skills
 
-nanobot 辅助 skill 集合，提供开发工作流规范、服务管理和批量任务编排能力。
+nanobot 辅助 skill 集合，提供开发工作流规范、服务管理、任务管理和批量任务编排能力。
 
 ## 包含的 Skills
 
 | Skill | 说明 |
 |-------|------|
+| **batch-dev-planner** | 批量需求统筹开发（依赖分析、分组编排、Phase 拆解、spawn 并行开发、统一验收） |
 | **batch-orchestrator** | 通用批工作调度框架（准备→主控→调度→Worker 四层编排） |
 | **dev-workflow** | 软件开发工作流规范（文档先行、任务拆解、Git 管理） |
 | **restart-gateway** | nanobot gateway 重启指南（区分 gateway channel 间接重启 vs web/cli 直接重启） |
 | **restart-webchat** | nanobot web-chat 服务重启 |
+| **todo** | 待办事项管理（增删改查、分组、标签、笔记，done 自动加 `已完成` tag） |
 | **web-subsession** | 通过 web-chat HTTP API 创建子 session 并委托任务（重启服务、后台任务、批量调度等） |
 
 ## 安装方法
@@ -24,10 +26,12 @@ git clone git@github.com:zhangxc11/nanobot-skills.git _nanobot-skills
 
 # 在 skills 目录创建软链接
 cd skills
+ln -s ../_nanobot-skills/batch-dev-planner batch-dev-planner
 ln -s ../_nanobot-skills/batch-orchestrator batch-orchestrator
 ln -s ../_nanobot-skills/dev-workflow dev-workflow
 ln -s ../_nanobot-skills/restart-gateway restart-gateway
 ln -s ../_nanobot-skills/restart-webchat restart-webchat
+ln -s ../_nanobot-skills/todo todo
 ln -s ../_nanobot-skills/web-subsession web-subsession
 ```
 
@@ -42,16 +46,20 @@ cd ~/.nanobot/workspace/_nanobot-skills && git pull
 ```
 ~/.nanobot/workspace/
 ├── _nanobot-skills/           # 本仓库（克隆到此处）
+│   ├── batch-dev-planner/
 │   ├── batch-orchestrator/
 │   ├── dev-workflow/
 │   ├── restart-gateway/
 │   ├── restart-webchat/
+│   ├── todo/
 │   └── web-subsession/
 └── skills/
+    ├── batch-dev-planner/     # → ../_nanobot-skills/batch-dev-planner
     ├── batch-orchestrator/    # → ../_nanobot-skills/batch-orchestrator
     ├── dev-workflow/          # → ../_nanobot-skills/dev-workflow
     ├── restart-gateway/       # → ../_nanobot-skills/restart-gateway
     ├── restart-webchat/       # → ../_nanobot-skills/restart-webchat
+    ├── todo/                  # → ../_nanobot-skills/todo
     └── web-subsession/        # → ../_nanobot-skills/web-subsession
 ```
 
