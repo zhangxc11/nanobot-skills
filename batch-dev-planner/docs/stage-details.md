@@ -38,9 +38,17 @@ plan JSON 中增加 `todo_ids` 字段，记录该 Plan 关联的 todo：
 1. **获取资源锁**（`active_batch.lock`）
 2. **初始化 dev-workdir**：首次 `git clone`，后续 `git fetch + reset --hard`
    > 如果 Plan 涉及的仓库不在 dev-workdir 中，应按需 clone 到 `dev-workdir/` 下（同样设置 push DISABLED），而非跳过 dev-workdir 流程。
-3. **逐 Plan 串行开发**（按依赖顺序）：
+3. **编号占位 commit**（规划完成后、开发开始前）：
+   - 在各仓库的文档（REQUIREMENTS.md / DEVLOG.md 等）中为本批次需求**预先创建编号占位符**
+   - 各仓库编号体系独立（nanobot-core 用 §N，web-chat 用 Phase N，skills 用各自编号）
+   - 占位 commit 提交到 dev 主分支，作为所有 feature branch 的共同起点
+   - 验收阶段新增需求的编号在占位编号之后顺延
+   - 记录各仓库当前最大编号到 `state.json` 或 `PLAN.md`
+4. **逐 Plan 串行开发**（按依赖顺序）：
 
-> **⚠️ 无论仓库类型（代码/文档/数据），所有 Plan 必须走 feature branch，禁止直接在主分支提交。**
+> **⚠️ 无论仓库类型（代码/文档/数据/独立 skill 仓库），所有 Plan 必须走 feature branch，禁止直接在主分支提交。**
+> - **独立 skill 仓库**（如 feishu-parser、feishu-messenger 等有独立 git 的 skill）同样适用，必须拉 feature branch 开发
+> - 分支命名统一：`feat/batch-YYYYMMDD-plan-{name}`，独立仓库也遵循此命名
 
    - 无依赖 → 从 `main` 拉分支；有依赖 → 从前序分支拉
    - 高风险 → 先 spawn 设计审查 SA（[prompt-templates.md §1](prompt-templates.md)）
@@ -88,11 +96,17 @@ plan JSON 中增加 `todo_ids` 字段，记录该 Plan 关联的 todo：
 
 为每个 Plan 维护 `review-state-{plan}.md`（模板见 [`prompt-templates.md`](prompt-templates.md)），遵循以下规则：
 
+0. **验收开始时创建**：为每个 Plan 创建 `review-state-{plan-name}.md`，记录以下结构化信息：
+   - 验收轮次（R1/R2/R3...）
+   - 每轮发现的问题清单及修复状态（pending / fixed / wontfix）
+   - 新增编号分配（验收中发现的新增需求，编号在占位编号之后顺延）
 1. 每次收到用户反馈后，立即将反馈内容和对齐结论写入 `review-state-{plan}.md`
 2. 每次 spawn subagent 修复前，先 `read_file` review-state 确认当前状态
 3. 每次修复完成后，更新 review-state 中的修复记录和检查项
 4. 如果不确定之前的对齐结论，先 `read_file` review-state 再行动
 5. 切换 Round 时，先更新 review-state 的「当前阶段」再继续
+6. **跨 session 验收时，review-state 是上下文同步的唯一可靠来源**，新 session 必须先读取 review-state 再开始工作
+7. **验收通过后，review-state 作为归档材料保留**，不删除
 
 ### 验收与 Todo 关联检查
 
