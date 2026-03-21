@@ -148,6 +148,7 @@ bash ~/.nanobot/workspace/web-chat/restart.sh all
 
 - [ ] 更新 todo 状态（`done`）
 - [ ] 更新 MEMORY.md / HISTORY.md
+- [ ] **补建 todo**：对照复盘文档 + MEMORY Known Bugs + 验收过程记录，梳理所有新发现的问题，与现有 todo 对比后补建遗漏项（详见 [`state-and-decisions.md` §4.4](state-and-decisions.md#4-复盘改进)）。**agent 主动执行，不等用户发起**
 - [ ] 清理工作目录（可选，建议保留复用）
 - [ ] Batch 标记 `completed`，释放资源锁
 

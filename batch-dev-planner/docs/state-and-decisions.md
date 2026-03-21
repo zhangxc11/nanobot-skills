@@ -80,4 +80,9 @@
    - 经验教训 → 追加到 [`lessons-learned.md`](lessons-learned.md)
    - 决策变更 → 更新上方 §3 决策记录表
    - 工具/脚本 bug → 创建 todo 跟踪修复
-4. ~~**试运行标记**：首次实施通过复盘后，移除顶部 ⚠️ 试运行标记~~ ✅ 已移除 (batch-20260313)
+4. **补建 todo**：复盘完成后，主动梳理整个 batch 过程中（含验收、部署、调试）发现的所有新问题，逐项与现有 todo 对比，将遗漏项补建为 todo。**此步骤不等用户发起，由 agent 主动执行**。分类处理：
+   - 代码 bug → 创建 todo（priority=high，tag=bug）
+   - 功能需求 / 技术债 → 创建 todo（priority=medium，tag=feature）
+   - 已决定暂缓的问题 → 记录到 MEMORY Known Bugs，注明暂缓原因，不建 todo
+   - 已通过流程改进解决的 → 不建 todo（已落地到文档）
+5. ~~**试运行标记**：首次实施通过复盘后，移除顶部 ⚠️ 试运行标记~~ ✅ 已移除 (batch-20260313)
