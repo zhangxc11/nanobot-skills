@@ -26,23 +26,14 @@ if [ -z "$NANOBOT_BIN" ]; then
 fi
 
 # --- Process discovery (robust) ---
+# ⚠️ macOS pgrep -f 无法匹配 double-fork daemon 进程，必须用 ps + grep
 find_gateway_pids() {
     local pids=""
-    # Strategy 1: match "nanobot gateway" in command line
-    pids=$(pgrep -f "nanobot gateway" 2>/dev/null || true)
-    # Filter out grep/editor/script processes that might match
-    if [ -n "$pids" ]; then
-        local filtered=""
-        for p in $pids; do
-            local cmd
-            cmd=$(ps -o command= -p "$p" 2>/dev/null || true)
-            # Only keep actual Python processes running nanobot gateway
-            if echo "$cmd" | grep -qE "[Pp]ython.*nanobot.*gateway"; then
-                filtered="${filtered}${filtered:+ }${p}"
-            fi
-        done
-        pids="$filtered"
-    fi
+    # Use ps -eo to scan all processes (works for daemons on macOS)
+    pids=$(ps -eo pid,args 2>/dev/null \
+        | grep "[Pp]ython.*nanobot.*gateway" \
+        | grep -v grep \
+        | awk '{print $1}' || true)
     echo "$pids"
 }
 

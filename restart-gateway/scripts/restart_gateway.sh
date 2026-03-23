@@ -26,20 +26,13 @@ GATEWAY_LOG="${GATEWAY_LOG_DIR}/gateway.log"
 echo "=== Restart Gateway via Web-Chat Worker API ==="
 
 # --- Robust gateway process discovery ---
+# ⚠️ macOS pgrep -f 无法匹配 double-fork daemon 进程，必须用 ps + grep
 find_gateway_pids() {
     local pids=""
-    pids=$(pgrep -f "nanobot gateway" 2>/dev/null || true)
-    if [ -n "$pids" ]; then
-        local filtered=""
-        for p in $pids; do
-            local cmd
-            cmd=$(ps -o command= -p "$p" 2>/dev/null || true)
-            if echo "$cmd" | grep -qE "[Pp]ython.*nanobot.*gateway"; then
-                filtered="${filtered}${filtered:+ }${p}"
-            fi
-        done
-        pids="$filtered"
-    fi
+    pids=$(ps -eo pid,args 2>/dev/null \
+        | grep "[Pp]ython.*nanobot.*gateway" \
+        | grep -v grep \
+        | awk '{print $1}' || true)
     echo "$pids"
 }
 
