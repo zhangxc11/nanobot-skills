@@ -86,6 +86,36 @@ cd ~/.nanobot/workspace/web-chat/frontend && npm run build
 bash ~/.nanobot/bin/nanobot-svc.sh restart prod webserver
 ```
 
+## 自杀保护与应对策略
+
+`nanobot-svc.sh` 内置自杀保护：当 `NANOBOT_PORT` 环境变量 == 目标端口时，脚本 **REFUSED** 并返回 exit code 1。
+
+**识别方法**：输出包含 `REFUSED` 关键字，exit code 非 0。示例：
+```
+❌ REFUSED: Cannot stop prod worker (port 8082) — this is our own process!
+❌ Self-kill protection triggered. NANOBOT_PORT=8082 matches target port.
+```
+
+### 应对策略速查
+
+| 你在哪 | 想操作什么 | 结果 | 应对方式 |
+|--------|-----------|------|---------|
+| prod worker (8082) | restart prod worker | ✅ REFUSED | 通过 gateway 或 dev worker 来重启 |
+| prod worker (8082) | restart dev worker | ❌ 安全 | 直接执行 |
+| prod worker (8082) | restart prod webserver | ❌ 安全 | 直接执行 |
+| dev worker (9082) | restart dev worker | ✅ REFUSED | 通过 gateway 或 prod worker 来重启 |
+| dev worker (9082) | restart prod worker | ❌ 安全 | 直接执行 |
+| gateway (18790) | restart prod worker | ❌ 安全 | 直接执行 |
+| gateway (18790) | restart prod webserver | ❌ 安全 | 直接执行 |
+
+> **Worker 重启自己会 REFUSED**：需要从其他进程发起。例如 prod worker 想重启自己，可以通过 gateway channel 或 dev worker 执行 `nanobot-svc.sh restart prod worker`。
+
+### 通用原则
+
+- 看到 `REFUSED` → **不要重试同样的命令**
+- 自杀 REFUSED → 委托给其他环境的进程执行（spawn subagent 到另一个 worker，或通过 gateway channel）
+- 重启 webserver 不受自杀保护影响（worker 和 webserver 是不同进程/端口）
+
 ## ⚠️ 注意事项
 
 1. **Web Chat worker 是当前 session 的宿主进程**：从 web-chat 发起重启 worker 会导致**当前任务中断**，但脚本使用 daemonize，重启后新 worker 会立即接管

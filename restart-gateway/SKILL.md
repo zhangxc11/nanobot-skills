@@ -72,6 +72,44 @@ bash ~/.nanobot/bin/nanobot-svc.sh switch-gw dev prod
 - 文件锁防止并发切换
 - 自动停止源 gateway → 启动目标 gateway
 
+## 自杀保护与应对策略
+
+`nanobot-svc.sh` 内置自杀保护：当 `NANOBOT_PORT` 环境变量 == 目标端口时，脚本 **REFUSED** 并返回 exit code 1。
+
+**识别方法**：输出包含 `REFUSED` 关键字，exit code 非 0。示例：
+```
+❌ REFUSED: Cannot stop prod gateway (port 18790) — this is our own process!
+❌ Self-kill protection triggered. NANOBOT_PORT=18790 matches target port.
+```
+
+### 应对策略速查
+
+| 你在哪 | 想操作什么 | 结果 | 应对方式 |
+|--------|-----------|------|---------|
+| gateway (18790) | restart prod gateway | ✅ REFUSED | 用 web-subsession 间接重启（让 worker 进程代执行） |
+| gateway (18790) | restart prod worker | ❌ 安全 | 直接执行 |
+| gateway (18790) | restart prod webserver | ❌ 安全 | 直接执行 |
+| prod worker (8082) | restart prod gateway | ❌ 安全 | 直接执行 |
+| dev worker (9082) | restart prod gateway | ❌ 安全 | 直接执行 |
+
+> **Gateway channel（飞书/Telegram）重启 gateway 必须走间接重启**：因为 agent 运行在 gateway 进程内，直接执行一定触发自杀保护。用 web-subsession 创建子 session，让 worker 进程代为执行 `nanobot-svc.sh restart prod gateway`。
+
+### Gateway 互斥 REFUSED
+
+这不是自杀保护，而是**互斥保护**：dev/prod gateway 不能同时运行。示例：
+```
+❌ REFUSED: Cannot start dev gateway — prod gateway is running (PID: 74735)!
+❌ Stop prod gateway first: nanobot-svc.sh stop prod gateway
+```
+
+**应对**：先 stop 另一环境的 gateway，再 start/restart。或直接用 `switch-gw` 命令一步完成。
+
+### 通用原则
+
+- 看到 `REFUSED` → **不要重试同样的命令**
+- 自杀 REFUSED → 委托给其他进程执行（web-subsession 间接重启）
+- 互斥 REFUSED → 先 stop 冲突的 gateway，或用 `switch-gw`
+
 ## ⚠️ 技术要点
 
 1. **Gateway 互斥**：只能有一个 gateway 运行（dev 或 prod），`nanobot-svc.sh` 自动检查
