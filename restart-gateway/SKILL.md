@@ -110,6 +110,17 @@ bash ~/.nanobot/bin/nanobot-svc.sh switch-gw dev prod
 - 自杀 REFUSED → 委托给其他进程执行（web-subsession 间接重启）
 - 互斥 REFUSED → 先 stop 冲突的 gateway，或用 `switch-gw`
 
+## ⚠️ 重启后 session 断连与 subagent 丢失
+
+**关键提醒**：间接重启 gateway 成功后，**当前 gateway 进程会被 kill**，导致：
+- 当前飞书/Telegram session **短暂断开**（新 gateway 进程启动后自动重连）
+- 正在运行的 **subagent 状态可能丢失**（subagent 跑在被 kill 的 gateway 进程中）
+
+**正确做法**：
+1. **重启前/重启后都用 `nanobot-svc.sh status prod gateway` 确认** — 检查 PID 是否变化、Uptime 是否重置
+2. **如果怀疑已经发生过重启（如 subagent 状态丢失），先 `status` 确认再决定是否重试** — 不要盲目重复操作
+3. 间接重启可以用 subagent 或主 session 发起，但要预期 subagent 可能因 gateway 重启而丢失状态
+
 ## ⚠️ 技术要点
 
 1. **Gateway 互斥**：只能有一个 gateway 运行（dev 或 prod），`nanobot-svc.sh` 自动检查
