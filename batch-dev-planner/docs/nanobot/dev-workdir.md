@@ -72,6 +72,8 @@ git checkout -b feat/batch-YYYYMMDD-plan-xxx
 
 命名规范：`feat/batch-{日期}-plan-{名称}`
 
+> **⚠️ 分支共存 vs checkout 互斥**：多个 feature branch 可以同时存在于同一仓库中（`git branch` 可见），但同一时刻只能 checkout 一个分支。checkout 切换会改变工作区文件，因此同仓库的 Plan 必须串行开发——前一个 Plan dev_done 后才能 checkout 下一个 Plan 的 feature branch。
+
 ---
 
 ## 查看状态
@@ -145,6 +147,6 @@ git merge --no-ff dev-workdir/feat/batch-xxx-plan-yyy
 ## 注意事项
 
 - dev-workdir 里的代码**仅用于开发和验收**，不直接部署
-- 验收通过前**不要合并到主仓库**
+- 验收通过前**不要合并到主仓库**（dev_done ≠ 可以 merge，merge 在 Stage 3 验收通过后执行）
 - 如果 dev-workdir 已存在且状态干净，新批次可以直接复用，不需要重新 clone
-- 多个 Plan 的 feature 分支可以并行存在，互不干扰
+- 多个 Plan 的 feature 分支可以并行存在，但同一时刻只能 checkout 一个（互不干扰的前提是串行开发）

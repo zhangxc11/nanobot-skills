@@ -67,3 +67,25 @@
 - `test_plan_add_invalid_depends_on_fails`: 验证不存在的 depends-on 被拒绝
 - `test_plan_update_depends_on`: 验证 plan update --depends-on 能正确修改依赖
 - `test_merge_multi_repo_partial_then_complete`: 验证跨仓库分两次 merge 都能成功
+
+---
+
+## Phase 3: batch-20260325 复盘整改 ✅
+
+**状态**: 已完成
+**日期**: 2026-03-25
+**需求**: REQ-2026-0325
+
+### 改动清单
+
+- [x] **P0-1** `stage-details.md` §1: Stage 1 补 req 文档流程（跨仓库依赖检查 + 写入 REQUIREMENTS.md + 编号占位合并到 Stage 1）
+- [x] **P0-1** `SKILL.md`: Stage 1 简述同步更新
+- [x] **P0-2** `stage-details.md` §2: 增加前置检查清单 + 串行开发原因说明 + dev_done 后禁止 merge 警告
+- [x] **P0-2** `SKILL.md`: Stage 2 简述 + 加载指引同步更新（唯一调度 session + merge 警告）
+- [x] **P0-2** `dev-workdir.md`: 修正分支共存歧义（可共存但 checkout 互斥）+ 注意事项更新
+- [x] **P0-3** `stage-details.md` §5: 收尾 checklist 结构化（todo 同步 + state.json + 分支清理）
+- [x] **P0-3** `SKILL.md`: Stage 5 简述同步更新
+- [x] **P1-1** `dev-workflow/SKILL.md`: 验收阶段 Checkpoint 增加 todo 状态同步
+- [x] **P1-2** `batch-dev-planner/SKILL.md`: Stage 2 加载指引增加主 session 调度约束（禁止直接查代码/改代码，spawn subagent 处理）
+- [x] **P1-3** `dev-workflow/SKILL.md`: 开发阶段自验收增加"从 TODO/req 提取验收 cases"要求 + summary 准则同步
+- [x] **P1-4** `restart-gateway/SKILL.md`: 补充重启感知说明（session 无缝恢复 + 进程 uptime 检测方法 + 间接重启后确认步骤）

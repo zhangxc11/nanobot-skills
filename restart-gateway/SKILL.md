@@ -116,10 +116,23 @@ bash ~/.nanobot/bin/nanobot-svc.sh switch-gw dev prod
 - 当前飞书/Telegram session **短暂断开**（新 gateway 进程启动后自动重连）
 - 正在运行的 **subagent 状态可能丢失**（subagent 跑在被 kill 的 gateway 进程中）
 
+**Gateway 重启后 session 无缝恢复**：新 gateway 进程启动后，session 会从文件自动恢复，agent 可继续对话。但 agent **无法自动感知重启事件**——没有内置的"重启通知"机制，agent 只是从上次的 session 文件继续。
+
+**自行判断是否刚重启过**：检查 gateway 进程的启动时间，与当前时间对比：
+```bash
+# 获取 gateway 进程启动时间
+ps -o lstart -p $(cat ~/.nanobot/run/prod-gateway-18791.pid) 2>/dev/null | tail -1
+
+# 或直接用 nanobot-svc.sh status 查看 Uptime
+bash ~/.nanobot/bin/nanobot-svc.sh status prod gateway
+```
+如果 Uptime 很短（< 5 分钟），说明刚重启过。可用此方法在回到原 session 后确认重启是否成功。
+
 **正确做法**：
 1. **重启前/重启后都用 `nanobot-svc.sh status prod gateway` 确认** — 检查 PID 是否变化、Uptime 是否重置
 2. **如果怀疑已经发生过重启（如 subagent 状态丢失），先 `status` 确认再决定是否重试** — 不要盲目重复操作
 3. 间接重启可以用 subagent 或主 session 发起，但要预期 subagent 可能因 gateway 重启而丢失状态
+4. **间接重启完成后，如果回到原 session，用上述 Uptime 检测方法确认重启是否成功**
 
 ## ⚠️ 技术要点
 

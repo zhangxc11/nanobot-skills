@@ -8,6 +8,7 @@
 
 1. **筛选**：`todo list --tag 已对齐` + `todo show <id>` 读取详情
 2. **依赖分析**：仓库依赖、代码依赖（协议→实现→调用）、文件重叠、跨仓库关联
+   - **跨仓库检查**：逐条 todo 标注涉及的所有仓库（代码仓库 + 文档仓库 + skill 仓库），Plan JSON 的 `repos` 字段必须完整覆盖所有涉及的仓库，不能遗漏
 3. **归集为 Plan**：
    - 独立小需求（< 50 行）合并；大需求（> 100 行 / 核心架构）独占
    - 依赖链按拓扑排列；前端与后端隔离
@@ -16,8 +17,15 @@
    - **每项标注「可自验 ✅」或「需人工 👤」**（可自验 = Agent 可自动化验证；需人工 = 必须用户亲自操作，如前端视觉/交互、真实环境端到端等）
    - 提取各需求的 Glossary，合并为 Plan 级关键术语定义（去重、统一表述）
    - 写入 PLAN.md 的每个 Plan 段落中
-5. **输出**：`plans/<批次名>_DEV_PLAN.md` + `state.json` + 各 `plan-{name}.json`
-6. **分支命名**：`feat/batch-YYYYMMDD-plan-{name}`
+5. **写入需求文档 + 编号占位**：
+   - 读取各仓库 REQUIREMENTS.md，确认当前最大编号和编号体系（各仓库编号体系独立，如 nanobot-core 用 §N，web-chat 用 Phase N，skills 用各自编号）
+   - 为本批次需求分配编号（在当前最大编号之后顺延）
+   - 将需求摘要写入各仓库 REQUIREMENTS.md（编号占位 + 基本信息）
+   - 记录各仓库当前最大编号到 `state.json` 或 `PLAN.md`
+   - 编号占位 commit 提交到 dev 主分支，作为所有 feature branch 的共同起点
+   - 验收阶段新增需求的编号在占位编号之后顺延
+6. **输出**：`plans/<批次名>_DEV_PLAN.md`（引用已分配的编号） + `state.json` + 各 `plan-{name}.json`
+7. **分支命名**：`feat/batch-YYYYMMDD-plan-{name}`
 
 ### Plan JSON 结构
 
@@ -49,16 +57,22 @@ plan JSON 中增加 `todo_ids`、`checklist`、`glossary` 字段：
 
 ## §2. Stage 2: 开发
 
+### 前置检查清单
+
+开发阶段开始前，必须逐项确认：
+
+- [ ] **资源锁**：已通过 `lock acquire` 获取，确认无其他 session 持有锁
+- [ ] **唯一调度 session**：当前 batch 只有一个调度 session 在运行，不存在重复调度
+- [ ] **dev-workdir 状态**：所有仓库在主分支且 `git status` 干净，无残留的 feature branch checkout
+
+### 操作步骤
+
 1. **获取资源锁**（`active_batch.lock`）
 2. **初始化 dev-workdir**：首次 `git clone`，后续 `git fetch + reset --hard`
    > 如果 Plan 涉及的仓库不在 dev-workdir 中，应按需 clone 到 `dev-workdir/` 下（同样设置 push DISABLED），而非跳过 dev-workdir 流程。
-3. **编号占位 commit**（规划完成后、开发开始前）：
-   - 在各仓库的文档（REQUIREMENTS.md / DEVLOG.md 等）中为本批次需求**预先创建编号占位符**
-   - 各仓库编号体系独立（nanobot-core 用 §N，web-chat 用 Phase N，skills 用各自编号）
-   - 占位 commit 提交到 dev 主分支，作为所有 feature branch 的共同起点
-   - 验收阶段新增需求的编号在占位编号之后顺延
-   - 记录各仓库当前最大编号到 `state.json` 或 `PLAN.md`
-4. **逐 Plan 串行开发**（按依赖顺序）：
+3. **逐 Plan 串行开发**（按依赖顺序）：
+
+> **为什么必须逐 Plan 串行？** dev-workdir 中同一仓库同一时刻只能 checkout 一个分支。虽然多个 feature branch 可以共存于仓库中，但 checkout 切换会影响工作区文件，导致并行开发的 SA 互相干扰。因此同仓库的 Plan 必须串行执行，前一个 Plan 开发完成（dev_done）后才能切换到下一个 Plan 的 feature branch。
 
 > **⚠️ 无论仓库类型（代码/文档/数据/独立 skill 仓库），所有 Plan 必须走 feature branch，禁止直接在主分支提交。**
 > - **独立 skill 仓库**（如 feishu-parser、feishu-messenger 等有独立 git 的 skill）同样适用，必须拉 feature branch 开发
@@ -69,6 +83,8 @@ plan JSON 中增加 `todo_ids`、`checklist`、`glossary` 字段：
    - spawn 开发 SA（[prompt-templates.md §2](prompt-templates.md)）
    - **开发完成后自验收**：SA 对照 Checklist 中所有「可自验 ✅」项逐项验证（L1 代码完整性 + L2 功能验证），不通过自修最多 2 轮，根本性偏差标记 `design_rejected` 回设计阶段
    - 所有「可自验」项通过 → 更新 plan 状态为 `dev_done`
+
+> **⚠️ dev_done ≠ 可以 merge**：开发完成后不要在此阶段执行 merge，merge 操作在 Stage 3 验收通过后才执行。过早 merge 会导致未验收的代码进入主分支，丧失验收否决权。
 
 ### Subagent 策略
 
@@ -194,11 +210,18 @@ bash ~/.nanobot/workspace/web-chat/restart.sh all
 
 ## §5. Stage 5: 收尾
 
-- [ ] 更新 todo 状态（`done`）
+### Checklist
+
+- [ ] **Todo 状态同步**：逐个检查 batch 内所有 Plan 关联的 `todo_ids`，确认已标记 `done`；未标记的执行 `todo done <id>`
+- [ ] **state.json 更新**：执行 `batch complete`，将 batch 状态标记为 `completed`，释放资源锁
+- [ ] **Feature 分支清理**：在 dev-workdir 中清理已合并的 feature branch
+  ```bash
+  cd ~/.nanobot/workspace/dev-workdir/{repo}
+  git branch --list 'feat/batch-*' | xargs -r git branch -D
+  ```
 - [ ] 更新 MEMORY.md / HISTORY.md
 - [ ] **补建 todo**：对照复盘文档 + MEMORY Known Bugs + 验收过程记录，梳理所有新发现的问题 → 列清单给用户确认 → 确认后创建 todo 并关联原始信息（详见 [`state-and-decisions.md` §4.4](state-and-decisions.md#4-复盘改进)）。**agent 主动发起，不等用户要求**
 - [ ] 清理工作目录（可选，建议保留复用）
-- [ ] Batch 标记 `completed`，释放资源锁
 
 ---
 

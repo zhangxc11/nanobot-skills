@@ -187,3 +187,29 @@ pending → developing → dev_done → reviewing → passed → merged
 - `passed`：验收通过
 - `merging`：部分仓库已合并（跨仓库场景的中间状态）
 - `merged`：所有仓库合并完成
+
+---
+
+## REQ-2026-0325: batch-20260325 复盘整改（7 条）
+
+**日期**: 2026-03-25
+**来源**: batch-20260319 复盘
+
+### 整改清单
+
+| 编号 | 优先级 | 涉及 Skill | 摘要 |
+|------|--------|------------|------|
+| P0-1 | P0 | batch-dev-planner | Stage 1 补 req 文档流程：对齐后写入 REQUIREMENTS.md、跨仓库依赖检查、编号占位合并到 Stage 1 |
+| P0-2 | P0 | batch-dev-planner | Stage 2 调度约束明确化：前置检查清单、dev-workdir 歧义修正、串行原因说明、merge 警告 |
+| P0-3 | P0 | batch-dev-planner | Stage 5 收尾 checklist 补充完善 |
+| P1-1 | P1 | dev-workflow | 验收阶段补 todo 状态同步 |
+| P1-2 | P1 | batch-dev-planner | 主 session 调度约束：禁止主 session 直接查代码/改代码，spawn subagent 处理 |
+| P1-3 | P1 | dev-workflow | 自验阶段要求从 TODO 提取验收 cases |
+| P1-4 | P1 | restart-gateway | 补充重启感知：进程 uptime 检测方法 |
+
+### 验收标准
+
+- 所有 7 条整改内容已写入对应文件
+- 不删除现有内容，只增加/修改
+- 文档风格与现有一致
+- git commit 完成
