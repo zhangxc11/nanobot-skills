@@ -18,28 +18,30 @@ todo list --status todo --format json
 
 > ⚠️ **严格只看 `status=todo` 和 `status=doing`**。`status=done` 表示**开发已完成**，绝对不要将 done 项目纳入盘点。即使 done 项目仍带有 `已对齐`、`方案已确认` 等 tag，这些只是历史标记，不代表"等待开发"。
 
-### 1.2 按对齐状态分层
+### 1.2 按对齐质量分层
 
-根据 todo 的 tag 信息，将需求分为 4 个层级：
+根据 todo 的 tag 信息和内容质量，将需求分为 4 个层级：
 
 | 层级 | 条件 | 状态 | 下一步 |
 |------|------|------|--------|
-| **L1** | tag 含 `已对齐` + `方案已确认` | ✅ 可直接排期 | 进入 Stage 1 归集 |
-| **L2** | tag 含 `已对齐` 但无 `方案已确认` | ⚠️ 需补方案 | 与用户讨论技术方案后补 tag |
+| **L1** | tag 含 `已对齐` + `方案已确认`，且需求描述中包含 **Glossary（关键术语定义）** 和 **验收 Checklist（可测试的通过条件）** | ✅ 可直接排期 | 进入 Stage 1 归集 |
+| **L2** | tag 含 `已对齐` + `方案已确认` 但缺 Glossary 或 Checklist；或 tag 含 `已对齐` 但无 `方案已确认` | ⚠️ 需补方案/Checklist | 补齐 Glossary + Checklist 后升级 L1 |
 | **L3** | tag 含 `待对齐` | ❌ 需与用户对齐 | 发起对齐讨论 |
 | **L4** | 无对齐相关 tag | ❓ 需先分类 | 先判断是否为有效需求 |
 
-### 1.3 按 group 分组展示
+> **L1 提升标准**：仅有 `已对齐` + `方案已确认` tag 不够，必须同时具备 Glossary 和验收 Checklist。缺少任一项降为 L2，需补充后才能排期。这与 dev-workflow 设计阶段的 Checkpoint 对齐。
 
-将分层结果按 todo 的 `group` 字段分组，便于用户按模块/仓库维度审视：
+### 1.3 按 group 分组展示（标注对齐质量）
+
+将分层结果按 todo 的 `group` 字段分组，标注每条需求的对齐质量，便于用户按模块/仓库维度审视：
 
 ```
 ## nanobot-core
-- [L1] #42 重构 config 加载逻辑（已对齐 + 方案已确认）
-- [L2] #45 支持多 worker 模式（已对齐，需补方案）
+- [L1] #42 重构 config 加载逻辑（已对齐 + 方案已确认 + Glossary ✓ + Checklist ✓）
+- [L2] #45 支持多 worker 模式（已对齐 + 方案已确认，⚠️ 缺 Checklist）
 
 ## web-chat
-- [L1] #51 会话列表分页（已对齐 + 方案已确认）
+- [L1] #51 会话列表分页（已对齐 + 方案已确认 + Glossary ✓ + Checklist ✓）
 - [L3] #53 深色模式（待对齐）
 
 ## 未分组
@@ -56,13 +58,14 @@ todo list --status todo --format json
 
 ## 2. 盘点期间的操作
 
-### 2.1 L2 需求补方案
+### 2.1 L2 需求补方案 / Glossary / Checklist
 
-对已对齐但缺方案的需求：
+对已对齐但缺方案、Glossary 或 Checklist 的需求：
 1. 读取 `todo show <id>` 获取完整描述
-2. 与用户讨论技术方案
-3. 方案确定后：`todo update <id> --add-tag 方案已确认`
-4. 升级为 L1，纳入可排期清单
+2. 与用户讨论技术方案（如缺方案）
+3. 补齐 Glossary（关键术语定义）和验收 Checklist（可测试的通过条件）
+4. 方案 + Glossary + Checklist 齐备后：`todo update <id> --add-tag 方案已确认`
+5. 升级为 L1，纳入可排期清单
 
 ### 2.2 L3 需求对齐
 

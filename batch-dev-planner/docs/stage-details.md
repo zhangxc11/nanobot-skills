@@ -11,18 +11,31 @@
 3. **归集为 Plan**：
    - 独立小需求（< 50 行）合并；大需求（> 100 行 / 核心架构）独占
    - 依赖链按拓扑排列；前端与后端隔离
-4. **输出**：`plans/<批次名>_DEV_PLAN.md` + `state.json` + 各 `plan-{name}.json`
-5. **分支命名**：`feat/batch-YYYYMMDD-plan-{name}`
+4. **聚合验收 Checklist + 关键术语**：
+   - 从 Plan 内各需求的验收 Checklist 聚合为 Plan 级 Checklist
+   - 提取各需求的 Glossary，合并为 Plan 级关键术语定义（去重、统一表述）
+   - 写入 PLAN.md 的每个 Plan 段落中
+5. **输出**：`plans/<批次名>_DEV_PLAN.md` + `state.json` + 各 `plan-{name}.json`
+6. **分支命名**：`feat/batch-YYYYMMDD-plan-{name}`
 
 ### Plan JSON 结构
 
-plan JSON 中增加 `todo_ids` 字段，记录该 Plan 关联的 todo：
+plan JSON 中增加 `todo_ids`、`checklist`、`glossary` 字段：
 
 ```json
 {
   "name": "plan-config-refactor",
   "status": "pending",
   "todo_ids": [42, 45],
+  "checklist": [
+    "config 热加载在修改后 3s 内生效",
+    "无效 config 文件给出明确错误提示",
+    "现有 config 格式向后兼容"
+  ],
+  "glossary": {
+    "hot-reload": "不重启进程的情况下重新加载配置",
+    "config schema": "配置文件的 JSON Schema 定义"
+  },
   "depends_on": [],
   "branch": "feat/batch-20260319-plan-config-refactor",
   "steps": [...]
@@ -65,14 +78,37 @@ plan JSON 中增加 `todo_ids` 字段，记录该 Plan 关联的 todo：
 
 ## §3. Stage 3: 验收
 
+验收分两层：**Agent 自主验收** → **人工验收确认**。
+
 1. 读取 `state.json`，列出所有 `dev_done` 的 Plan
 2. **启动 dev 环境**（独立端口 + 独立日志，详见 [nanobot/dev-env.md](nanobot/dev-env.md)）
 3. **逐 Plan 验收**（按依赖顺序），每个 Plan 流程：
-   1. **验收前**：feature branch 从 dev 主分支 merge 更新
-   2. **在 feature branch 上验收**（静态审查 + 测试 + 人工交互）
-   3. 发现问题 → 在 feature branch 上修复 → 再次验收（R2/R3...）
-   4. **验收通过** → commit 压缩 → `merge --no-ff` 到 dev 主分支
-   5. 下一个 Plan 重复 1-4
+
+### 第一层：Agent 自主验收
+
+1. **验收前**：feature branch 从 dev 主分支 merge 更新
+2. **在 feature branch 上对照 Plan 的验收 Checklist 逐项检查**：
+   - **L1 代码完整性** — 所有 checkbox 已勾选，无遗漏文件，import/依赖完整
+   - **L2 功能验证** — 真实场景端到端测试（不是只跑单元测试），对照 Checklist 每项验证
+3. 不通过 → 在 feature branch 上自修，**最多 2 轮**
+4. **止损**：发现根本性设计偏差 → 停止自修，标记该 Plan 为 `design_rejected`，回到设计阶段重新对齐
+5. 自验收通过 → 输出该 Plan 的验收报告
+
+### 第二层：人工验收确认
+
+6. **汇总验收报告交用户**，格式：
+   ```
+   ## Plan: {plan-name} 验收报告
+   - Checklist 通过情况：逐项列出 ✅/❌
+   - 测试结果：L1/L2 验证详情
+   - 自修记录：修了几轮、改了什么（如有）
+   - 遗留问题：TODO 列表（如有）
+   - 文档状态：三件套是否已更新
+   ```
+7. **用户确认通过** → commit 压缩 → `merge --no-ff` 到 dev 主分支
+8. 用户要求修改 → 在 feature branch 上修复 → 重新走自验收
+9. 下一个 Plan 重复上述流程
+
 4. 所有 Plan 验收通过 → 关闭 dev 环境
 
 ### commit 压缩规则
@@ -84,9 +120,12 @@ plan JSON 中增加 `todo_ids` 字段，记录该 Plan 关联的 todo：
 
 自动化测试（build 通过、lint 通过）不能替代视觉/交互验收。前端相关 Plan 验收时，必须 build → 重启 dev webserver → 通知用户访问 `localhost:9081` → **等用户明确确认后才标记通过**。详见 [frontend-acceptance.md](frontend-acceptance.md)。
 
-### 验收回退
+### 验收回退与止损
 
-交互决定，可原地修复或打回 todo。
+- **自修 ≤ 2 轮**：Agent 自验收不通过时，自修最多 2 轮
+- **根本性偏差**：发现设计层面问题（需求理解错误、架构不合理等），立即停止自修，标记 `design_rejected`，回到 Stage 1 重新设计
+- **人工验收不通过**：用户反馈问题后，在 feature branch 上修复，重新走自验收流程
+- **打回 todo**：用户判断需求本身有问题，可打回 todo 重新对齐
 
 ### Gateway 验收
 
