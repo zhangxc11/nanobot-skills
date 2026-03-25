@@ -13,6 +13,7 @@
    - 依赖链按拓扑排列；前端与后端隔离
 4. **聚合验收 Checklist + 关键术语**：
    - 从 Plan 内各需求的验收 Checklist 聚合为 Plan 级 Checklist
+   - **每项标注「可自验 ✅」或「需人工 👤」**（可自验 = Agent 可自动化验证；需人工 = 必须用户亲自操作，如前端视觉/交互、真实环境端到端等）
    - 提取各需求的 Glossary，合并为 Plan 级关键术语定义（去重、统一表述）
    - 写入 PLAN.md 的每个 Plan 段落中
 5. **输出**：`plans/<批次名>_DEV_PLAN.md` + `state.json` + 各 `plan-{name}.json`
@@ -28,9 +29,9 @@ plan JSON 中增加 `todo_ids`、`checklist`、`glossary` 字段：
   "status": "pending",
   "todo_ids": [42, 45],
   "checklist": [
-    "config 热加载在修改后 3s 内生效",
-    "无效 config 文件给出明确错误提示",
-    "现有 config 格式向后兼容"
+    "✅ config 热加载在修改后 3s 内生效",
+    "✅ 无效 config 文件给出明确错误提示",
+    "👤 现有 config 格式向后兼容（需人工确认迁移场景）"
   ],
   "glossary": {
     "hot-reload": "不重启进程的情况下重新加载配置",
@@ -66,7 +67,8 @@ plan JSON 中增加 `todo_ids`、`checklist`、`glossary` 字段：
    - 无依赖 → 从 `main` 拉分支；有依赖 → 从前序分支拉
    - 高风险 → 先 spawn 设计审查 SA（[prompt-templates.md §1](prompt-templates.md)）
    - spawn 开发 SA（[prompt-templates.md §2](prompt-templates.md)）
-   - 完成 → 更新 plan 状态为 `dev_done`
+   - **开发完成后自验收**：SA 对照 Checklist 中所有「可自验 ✅」项逐项验证（L1 代码完整性 + L2 功能验证），不通过自修最多 2 轮，根本性偏差标记 `design_rejected` 回设计阶段
+   - 所有「可自验」项通过 → 更新 plan 状态为 `dev_done`
 
 ### Subagent 策略
 
@@ -78,36 +80,43 @@ plan JSON 中增加 `todo_ids`、`checklist`、`glossary` 字段：
 
 ## §3. Stage 3: 验收
 
-验收分两层：**Agent 自主验收** → **人工验收确认**。
+> 「可自验 ✅」项在 Stage 2 已由 SA 跑过并通过；Stage 3 负责**所有项的用户最终确认**。
 
 1. 读取 `state.json`，列出所有 `dev_done` 的 Plan
 2. **启动 dev 环境**（独立端口 + 独立日志，详见 [nanobot/dev-env.md](nanobot/dev-env.md)）
 3. **逐 Plan 验收**（按依赖顺序），每个 Plan 流程：
 
-### 第一层：Agent 自主验收
+### 输出验收报告
 
 1. **验收前**：feature branch 从 dev 主分支 merge 更新
-2. **在 feature branch 上对照 Plan 的验收 Checklist 逐项检查**：
-   - **L1 代码完整性** — 所有 checkbox 已勾选，无遗漏文件，import/依赖完整
-   - **L2 功能验证** — 真实场景端到端测试（不是只跑单元测试），对照 Checklist 每项验证
-3. 不通过 → 在 feature branch 上自修，**最多 2 轮**
-4. **止损**：发现根本性设计偏差 → 停止自修，标记该 Plan 为 `design_rejected`，回到设计阶段重新对齐
-5. 自验收通过 → 输出该 Plan 的验收报告
+2. **生成验收报告**，清楚区分两类项：
 
-### 第二层：人工验收确认
-
-6. **汇总验收报告交用户**，格式：
    ```
    ## Plan: {plan-name} 验收报告
-   - Checklist 通过情况：逐项列出 ✅/❌
-   - 测试结果：L1/L2 验证详情
+
+   ### 自验已通过（待人工 confirm）
+   - [x] ✅ {Checklist 项} — 自验方式：xxx，结果：通过
+   - [x] ✅ {Checklist 项} — 自验方式：xxx，结果：通过
+
+   ### 需人工操作验证
+   - [ ] 👤 {Checklist 项} — 验证方式：xxx（需用户亲自操作）
+   - [ ] 👤 {Checklist 项} — 验证方式：xxx（需用户亲自操作）
+
+   ### 其他
    - 自修记录：修了几轮、改了什么（如有）
    - 遗留问题：TODO 列表（如有）
    - 文档状态：三件套是否已更新
    ```
-7. **用户确认通过** → commit 压缩 → `merge --no-ff` 到 dev 主分支
-8. 用户要求修改 → 在 feature branch 上修复 → 重新走自验收
-9. 下一个 Plan 重复上述流程
+
+### 人工验收确认
+
+3. **汇总验收报告交用户**：
+   - **「可自验 ✅」项**：Agent 已在 Stage 2 跑过，用户 review 验收报告后 confirm 即可
+   - **「需人工 👤」项**：用户亲自操作验证（如前端视觉/交互、真实环境端到端等）
+   - **所有项都需要用户最终确认**，不能因为自验通过就跳过
+4. **用户确认通过** → commit 压缩 → `merge --no-ff` 到 dev 主分支
+5. 用户要求修改 → 在 feature branch 上修复 → 重新验证受影响的项
+6. 下一个 Plan 重复上述流程
 
 4. 所有 Plan 验收通过 → 关闭 dev 环境
 
@@ -122,9 +131,9 @@ plan JSON 中增加 `todo_ids`、`checklist`、`glossary` 字段：
 
 ### 验收回退与止损
 
-- **自修 ≤ 2 轮**：Agent 自验收不通过时，自修最多 2 轮
-- **根本性偏差**：发现设计层面问题（需求理解错误、架构不合理等），立即停止自修，标记 `design_rejected`，回到 Stage 1 重新设计
-- **人工验收不通过**：用户反馈问题后，在 feature branch 上修复，重新走自验收流程
+- **自修 ≤ 2 轮**（Stage 2）：SA 开发完后自验收不通过时，自修最多 2 轮
+- **根本性偏差**（Stage 2）：发现设计层面问题（需求理解错误、架构不合理等），立即停止自修，标记 `design_rejected`，回到 Stage 1 重新设计
+- **人工验收不通过**（Stage 3）：用户反馈问题后，在 feature branch 上修复，重新验证受影响的项
 - **打回 todo**：用户判断需求本身有问题，可打回 todo 重新对齐
 
 ### Gateway 验收
