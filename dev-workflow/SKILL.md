@@ -157,3 +157,35 @@ project/docs/
 
 - Session 结束时 DEVLOG 记录效率数据（耗时、卡点、改进点）
 - 发现流程问题 → 更新对应阶段准则
+
+## 约束与准则
+
+### 任务委派
+- subagent 执行具体开发时应调用 claude-code skill，而非自己直接用 read_file/edit_file 改代码
+- 主 session 不直接调用 claude code
+
+### 文档规范
+- 需求编号复用已有体系（nanobot §N / feishu-docs Phase/FN.M / feishu-parser FR-N）
+- 排期单位是 TODO（可跨仓库）
+- req 文档索引放 REQUIREMENTS.md，细节写独立文件
+- 分析文档按 `data/analysis/_INDEX_目录结构与分类规则.md` 分类
+
+### 合并与审计
+- LLM 自验收不可跳过
+- 合并前审计（git 记录 + 过程文档）
+- 补文档从原始设计提取，不从代码反推
+- 紧急修复可跳过方案设计，但仓库文档三件套不省
+
+### 测试
+- 测试数据用相对日期，不硬编码
+
+### nanobot 开发专用
+> 详见 [references/nanobot-dev-constraints.md](references/nanobot-dev-constraints.md)
+
+### 写入 summary 的准则
+> 使用 dev-workflow 时，将以下内容一字不改追加到 session summary 的 `## 当前工作准则` 段。
+
+```
+- subagent 开发用 claude-code skill，不直接 read_file/edit_file 改代码
+- 合并前审计 git 记录 + 过程文档，自验收不可跳过
+```
