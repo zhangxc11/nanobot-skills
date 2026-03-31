@@ -127,3 +127,7 @@ bash ~/.nanobot/workspace/skills/web-subsession/scripts/create_subsession.sh \
 | **batch-orchestrator** | 批量调度框架，调度 session 通过本 skill 创建 |
 | **restart-gateway** | 飞书/Telegram channel 下通过本 skill 创建子 session，执行 `nanobot-svc.sh restart <env> gateway` |
 | **restart-webchat** | 通常不需要子 session，直接 `nanobot-svc.sh restart <env> worker/webserver` 即可 |
+
+## API 注意事项
+
+- web-chat POST /messages 字段名是 `message` 不是 `content`
