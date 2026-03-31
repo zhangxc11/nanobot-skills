@@ -64,13 +64,19 @@ Phase 1        Phase 2          Phase 3        Phase 4       Phase 5
 **第一时间创建持久化状态文件**，这是跨 session / 跨 consolidation 的记忆锚点。
 
 ```bash
-# 建议路径
-data/analysis/{task-name}/
+# 建议路径 — 按主题分类存放
+data/analysis/{topic}/{task-name}/
 ├── STATE.md          # 任务状态（必须）
 ├── progress.md       # 详细进展日志
 ├── repro.py          # 复现脚本（如适用）
 └── findings/         # 中间发现物
+
+# 示例：
+# data/analysis/consolidation/v70-rewrite/STATE.md
+# data/analysis/cron/partition-redesign/STATE.md
 ```
+
+> ⚠️ **如果要写入 `data/analysis/`，必须先读 `data/analysis/_INDEX_目录结构与分类规则.md`，遵循分类规则放入对应子目录。** 不要直接往 `data/analysis/` 根目录堆文件。
 
 STATE.md 格式见 [docs/task-state.md](docs/task-state.md)。
 

@@ -68,7 +68,7 @@
 ```
 新 session 开始:
 1. 用户提及任务名 或 agent 从 MEMORY.md 找到任务引用
-2. read_file("data/analysis/{task}/STATE.md")
+2. read_file("data/analysis/{topic}/{task}/STATE.md")
 3. 从"下一步"继续推进
 4. 如需更多上下文 → read progress.md 或 findings/
 ```
@@ -79,7 +79,7 @@
 
 ```markdown
 - **{任务名}** — {状态emoji} {一句话描述}
-  - **STATE**: `data/analysis/{task}/STATE.md`
+  - **STATE**: `data/analysis/{topic}/{task}/STATE.md`
   - **下一步**: {从 STATE.md 复制}
 ```
 
