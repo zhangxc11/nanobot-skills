@@ -2,11 +2,13 @@
 
 <!-- detection_keywords: standard-dev -->
 
-## 🟡 L1 REQUIRED（项目要求）
+## 🔴 L0 MUST（违反即失败）
 
-### STD-005: 代码开发需评估 dev-dir 隔离
-代码开发时需评估是否应在 dev-dir（开发目录）中隔离开发，避免直接修改 prod 部署目录。
-对于有 dev-workdir 副本的项目，应优先在 dev-dir 中开发和测试。
+### STD-005: 已知项目必须在 dev-dir 中开发
+对于已配置 dev-workdir 的项目，所有代码变更必须在 dev-dir（开发目录）中进行，禁止直接修改 prod 部署目录。
+已知有 dev-workdir 的项目：
+- **nanobot**: `~/.nanobot/workspace/dev-workdir/nanobot/`（详见 nanobot.md NANO-002）
+- **web-chat**: `~/.nanobot/workspace/dev-workdir/web-chat/`（详见 webchat.md WEB-001）
 
 ## 🟢 L2 RECOMMENDED（最佳实践）
 

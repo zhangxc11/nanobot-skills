@@ -68,6 +68,8 @@ MAX_ORCHESTRATION_ITERATIONS = 5      # Total iteration cap for developer↔test
 MAX_SAME_ROLE_CONSECUTIVE = 2         # Max consecutive partial dispatches of same role
 REPORTS_DIR = WORKSPACE / "data" / "brain" / "reports"
 
+FEISHU_NOTIFY_RECIPIENT = "ou_2fba93da1d059fd2520c2f385743f175"
+
 REPORT_SCHEMA = {
     "required": ["task_id", "role", "verdict", "summary"],
     "optional": ["issues", "files_changed"],
@@ -683,6 +685,105 @@ def make_decision(report: dict | None, task: dict) -> Decision:
     )
 
 
+def _send_feishu_notify(text: str, task_id: str = "") -> bool:
+    """Send a feishu text notification to the configured recipient.
+
+    Uses feishu_messenger.py send-text CLI. Failures are logged but never
+    block the scheduler flow.
+
+    Args:
+        text: Notification text to send
+        task_id: Associated task ID for notify-log
+
+    Returns:
+        True if message was sent successfully, False otherwise
+    """
+    import subprocess
+    messenger_script = WORKSPACE / "skills" / "feishu-messenger" / "scripts" / "feishu_messenger.py"
+    if not messenger_script.exists():
+        print(f"[scheduler] feishu_messenger.py not found at {messenger_script}", flush=True)
+        return False
+
+    try:
+        result = subprocess.run(
+            [
+                sys.executable, str(messenger_script),
+                "send-text",
+                "--to", FEISHU_NOTIFY_RECIPIENT,
+                "--text", text,
+                "--source", "scheduler",
+                "--task-id", task_id,
+            ],
+            capture_output=True, text=True, timeout=30,
+        )
+        if result.returncode == 0:
+            print(f"[scheduler] feishu notify sent for {task_id}", flush=True)
+            return True
+        else:
+            print(f"[scheduler] feishu notify failed: {result.stderr}", flush=True)
+            return False
+    except Exception as exc:
+        print(f"[scheduler] feishu notify exception: {exc}", flush=True)
+        return False
+
+
+def notify_task_state_change(task: dict, new_state: str, reason: str = "") -> bool:
+    """Send feishu notification when a task enters review/blocked/done state.
+
+    Args:
+        task: Task dict
+        new_state: The new state (review, blocked, done)
+        reason: Additional context (e.g. blocked reason, review summary)
+
+    Returns:
+        True if notification was sent successfully
+    """
+    try:
+        from feishu_notify import (
+            format_review_notify,
+            format_done_notify,
+            format_error_notify,
+            extract_short_id,
+        )
+    except ImportError:
+        print("[scheduler] feishu_notify module not available, skipping notification", flush=True)
+        return False
+
+    task_id = task.get("id", "")
+
+    if new_state == "review":
+        # Try to load the latest pending review for rich formatting
+        try:
+            pending_reviews = bm.get_task_pending_reviews(task_id)
+            if pending_reviews:
+                text = format_review_notify(task, pending_reviews[-1])
+            else:
+                short_id = extract_short_id(task_id)
+                title = task.get("title", "")
+                text = (
+                    f"📋 [{short_id}] {title} — 等待 Review\n"
+                    f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+                    f"Tester 已通过，请确认: {short_id} Go / NoGo"
+                )
+                if reason:
+                    text += f"\n摘要: {reason}"
+        except Exception:
+            short_id = extract_short_id(task_id)
+            title = task.get("title", "")
+            text = f"📋 [{short_id}] {title} — 等待 Review\n请确认: {short_id} Go / NoGo"
+
+    elif new_state == "blocked":
+        text = format_error_notify(task, reason or "未知原因")
+
+    elif new_state == "done":
+        text = format_done_notify(task)
+
+    else:
+        return False
+
+    return _send_feishu_notify(text, task_id)
+
+
 def execute_decision(decision: Decision, task: dict) -> dict:
     """Execute an orchestration decision.
 
@@ -732,14 +833,25 @@ def execute_decision(decision: Decision, task: dict) -> dict:
             # Transition to review
             bm.transition_task(task_id, "review", note="orchestrator: tester passed, submitting review")
 
+            # Notify user: task awaiting review
+            notify_task_state_change(task, "review", reason=decision.params.get("summary", ""))
+
             return {"ok": True, "action": action, "review_id": review_id}
 
         elif action == "mark_done":
             bm.transition_task(task_id, "done", note=f"orchestrator: {decision.reason}")
+
+            # Notify user: task completed
+            notify_task_state_change(task, "done")
+
             return {"ok": True, "action": action}
 
         elif action == "mark_blocked":
             bm.transition_task(task_id, "blocked", note=f"orchestrator: {decision.reason}")
+
+            # Notify user: task blocked, needs decision
+            notify_task_state_change(task, "blocked", reason=decision.reason)
+
             return {"ok": True, "action": action, "reason": decision.reason}
 
         elif action == "dispatch_role":
