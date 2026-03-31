@@ -1,0 +1,60 @@
+name: quick
+display_name: "快速通道"
+description: "简单查询、信息整理、一次性操作（< 10 分钟）"
+autonomy_level: L0
+
+matching:
+  keywords:
+    - "查询"
+    - "查看"
+    - "查"
+    - "搜索"
+    - "查天气"
+    - "查日程"
+    - "查日历"
+    - "读"
+    - "总结"
+    - "翻译"
+    - "解释"
+    - "帮我看"
+    - "帮我查"
+    - "简单"
+    - "快速"
+    - "看看"
+    - "what is"
+    - "what's"
+    - "告诉我"
+    - "问一下"
+  traits:
+    estimated_time_max_minutes: 10
+    involves_code: false
+    requires_user_confirmation: false
+    is_exploratory: false
+    is_cron_triggered: false
+  priority: 10  # higher = checked first in matching
+
+execution:
+  steps:
+    - name: execute
+      description: "主 session 内联执行或 spawn 1 个 SA"
+      roles: []
+    - name: complete
+      description: "记录结果到 BRIEFING"
+      roles: []
+  max_subagents: 1
+  creates_yaml_task: false
+  creates_branch: false
+
+roles: []
+
+associated_skills: []
+
+review:
+  default_level: "L0"
+  roles: []
+  checklist_override: null
+
+escalation:
+  enabled: true
+  target_template: "standard-dev"
+  trigger: "complexity exceeds quick threshold"

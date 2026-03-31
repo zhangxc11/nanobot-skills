@@ -1,0 +1,68 @@
+name: long-task
+display_name: "长程问题"
+description: "复杂调试、深度分析、跨多 session 的探索（数小时~数天）"
+autonomy_level: L2
+
+matching:
+  keywords:
+    - "调查"
+    - "分析"
+    - "排查"
+    - "debug"
+    - "investigate"
+    - "探索"
+    - "研究"
+    - "深入"
+    - "根因"
+    - "root cause"
+    - "为什么"
+    - "不清楚"
+    - "复杂问题"
+    - "诊断"
+    - "追踪"
+    - "溯源"
+  traits:
+    estimated_time_max_minutes: 4320
+    involves_code: false
+    requires_user_confirmation: false
+    is_exploratory: true
+    is_cron_triggered: false
+  priority: 4
+
+execution:
+  steps:
+    - name: define
+      description: "问题定义与边界确认"
+      roles: ["architect"]
+    - name: investigate
+      description: "STATE.md 驱动迭代探索"
+      roles: ["developer", "tester"]
+    - name: converge
+      description: "收敛结论与验证"
+      roles: ["tester", "reviewer"]
+  max_subagents: 3
+  creates_yaml_task: true
+  creates_branch: false
+  state_file_driven: true
+
+roles:
+  - name: architect
+    description: "问题定义"
+  - name: developer
+    description: "探索实施"
+  - name: tester
+    description: "假设验证"
+  - name: reviewer
+    description: "结论审查"
+
+associated_skills:
+  - "long-task"
+
+review:
+  default_level: "L2"
+  roles:
+    - "test_verifier"
+  checklist_override: null
+
+escalation:
+  enabled: false

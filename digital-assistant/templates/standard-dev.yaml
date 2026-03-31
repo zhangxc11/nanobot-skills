@@ -1,0 +1,76 @@
+name: standard-dev
+display_name: "标准开发"
+description: "单个功能开发、Bug 修复、文档编写（1~4 小时）"
+autonomy_level: L2
+
+matching:
+  keywords:
+    - "开发"
+    - "实现"
+    - "修复"
+    - "fix"
+    - "bug"
+    - "feature"
+    - "功能"
+    - "编写代码"
+    - "重构"
+    - "refactor"
+    - "优化代码"
+    - "添加功能"
+    - "新增功能"
+    - "implement"
+    - "develop"
+    - "代码"
+    - "编程"
+    - "脚本"
+    - "模块"
+  traits:
+    estimated_time_max_minutes: 240
+    involves_code: true
+    requires_user_confirmation: false
+    is_exploratory: false
+    is_cron_triggered: false
+    related_todos_max: 4
+  priority: 5
+
+execution:
+  steps:
+    - name: design
+      description: "设计方案"
+      roles: ["architect"]
+    - name: implement
+      description: "编码实现"
+      roles: ["developer"]
+    - name: verify
+      description: "自验测试"
+      roles: ["tester"]
+    - name: review
+      description: "代码审查"
+      roles: ["reviewer"]
+  max_subagents: 2
+  creates_yaml_task: true
+  creates_branch: true
+
+roles:
+  - name: architect
+    description: "架构设计与方案审核"
+  - name: developer
+    description: "编码实现"
+  - name: tester
+    description: "测试验证"
+  - name: reviewer
+    description: "代码审查与质量把关"
+
+associated_skills:
+  - "dev-workflow"
+
+review:
+  default_level: "L2"
+  roles:
+    - "code_reviewer"
+  checklist_override: null
+
+escalation:
+  enabled: true
+  target_template: "batch-dev"
+  trigger: "scope exceeds single feature"

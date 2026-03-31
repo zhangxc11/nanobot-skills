@@ -1,0 +1,51 @@
+name: cron-auto
+display_name: "定时自动任务"
+description: "定期执行的自动化任务（如 CIL 日报）"
+autonomy_level: L0
+
+matching:
+  keywords:
+    - "定时"
+    - "cron"
+    - "自动"
+    - "日报"
+    - "周报"
+    - "定期"
+    - "scheduled"
+    - "recurring"
+    - "每天"
+    - "每周"
+    - "自动执行"
+    - "计划任务"
+  traits:
+    estimated_time_max_minutes: 30
+    involves_code: false
+    requires_user_confirmation: false
+    is_exploratory: false
+    is_cron_triggered: true
+  priority: 20  # highest priority — cron tasks always match first
+
+execution:
+  steps:
+    - name: execute
+      description: "Cron 触发执行"
+      roles: []
+    - name: notify
+      description: "结果通知"
+      roles: []
+  max_subagents: 1
+  creates_yaml_task: true
+  creates_branch: false
+
+roles: []
+
+associated_skills:
+  - "cron"
+
+review:
+  default_level: "L0"
+  roles: []
+  checklist_override: null
+
+escalation:
+  enabled: false

@@ -1,0 +1,71 @@
+name: batch-dev
+display_name: "批量开发"
+description: "多需求并行开发（半天~数天）"
+autonomy_level: L3
+
+matching:
+  keywords:
+    - "批量"
+    - "batch"
+    - "多个需求"
+    - "并行开发"
+    - "集中开发"
+    - "统筹开发"
+    - "多条需求"
+    - "积压需求"
+    - "批量处理"
+    - "多任务"
+  traits:
+    estimated_time_max_minutes: 2880
+    involves_code: true
+    requires_user_confirmation: true
+    is_exploratory: false
+    is_cron_triggered: false
+    related_todos_min: 5
+  priority: 3
+
+execution:
+  steps:
+    - name: inventory
+      description: "需求盘点与依赖分析"
+      roles: ["architect"]
+    - name: plan
+      description: "分组编排与 Phase 拆解"
+      roles: ["architect"]
+    - name: parallel_dev
+      description: "并行开发（多 SA）"
+      roles: ["developer", "tester"]
+    - name: integrate
+      description: "集成验收"
+      roles: ["tester", "reviewer"]
+    - name: release
+      description: "发布"
+      roles: ["reviewer"]
+  max_subagents: 10
+  creates_yaml_task: true
+  creates_branch: true
+
+roles:
+  - name: architect
+    description: "需求分析与架构设计"
+  - name: developer
+    description: "并行编码实现"
+  - name: tester
+    description: "集成测试"
+  - name: reviewer
+    description: "验收审查"
+
+associated_skills:
+  - "batch-dev-planner"
+  - "batch-orchestrator"
+  - "dev-workflow"
+
+review:
+  default_level: "L3"
+  roles:
+    - "code_reviewer"
+    - "test_verifier"
+  checklist_override: null
+
+escalation:
+  enabled: false
