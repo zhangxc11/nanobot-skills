@@ -109,3 +109,8 @@ Stage 0 → Stage 1 → Stage 2 → Stage 3 → Stage 4 → Stage 5
 | 动态追加 | `pending` 可追加，`developing` 后锁定 |
 | 前端验收 | build → dev webserver → 用户访问确认 → 才标记通过 |
 | Hotfix | 不走 batch，主分支直修；完成后 feature branch `merge origin/main` 同步 |
+
+### 调度约束
+
+- 用一个 web subsession 做统一调度中心（spawn 多个 subagent 并行）
+- batch-dev-planner 和 dev-workflow 配套使用
