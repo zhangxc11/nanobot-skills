@@ -1789,12 +1789,14 @@ class TestMakeDecision:
             "role": "developer",
             "verdict": "pass",
             "summary": "Implementation complete",
+            "files_changed": ["src/main.py", "DEVLOG.md"],
         }
         task = {
             "id": "T-001",
             "priority": "P1",
             "workgroup": {"template": "standard-dev"},
             "orchestration": {"iteration": 1, "history": []},
+            "design_ref": "D-test-001",  # satisfies doc triplet design check
         }
 
         decision = sched.make_decision(report, task)
@@ -2004,11 +2006,13 @@ class TestMakeDecision:
             "role": "developer",
             "verdict": "pass",
             "summary": "Implementation complete after partial",
+            "files_changed": ["src/main.py", "DEVLOG.md"],
         }
         task = {
             "id": "T-004",
             "priority": "P1",
             "workgroup": {"template": "standard-dev"},
+            "design_ref": "D-test-004",  # satisfies doc triplet design check
             "orchestration": {
                 "iteration": 2,
                 "history": [
@@ -2255,8 +2259,11 @@ class TestHandleWorkerCompletion:
         monkeypatch.setattr(sched, "REPORTS_DIR", reports_dir)
 
         task = _create_task("T-001", status="executing", priority="P1")
+        # Add design_ref to satisfy doc triplet check
+        task["design_ref"] = "D-test-001"
+        bm.save_task(task)
 
-        # Write developer pass report
+        # Write developer pass report (include DEVLOG in files_changed)
         report_file = reports_dir / "T-001-developer-1234567890.json"
         with report_file.open("w") as f:
             json.dump({
@@ -2264,7 +2271,7 @@ class TestHandleWorkerCompletion:
                 "role": "developer",
                 "verdict": "pass",
                 "summary": "Implementation complete",
-                "files_changed": ["main.py"],
+                "files_changed": ["main.py", "DEVLOG.md"],
             }, f)
 
         result = sched.handle_worker_completion("T-001", "developer")
@@ -2430,3 +2437,190 @@ class TestHandleCompletionCLI:
         # Auto-detect should find it
         result = sched.parse_worker_report("T-001")
         assert result is not None
+
+
+
+# ──────────────────────────────────────────
+# Phase 1: Design gate & doc triplet tests
+# ──────────────────────────────────────────
+
+class TestCheckDesignGate:
+    """Test check_design_gate() function."""
+
+    def test_quick_template_exempt(self):
+        import scheduler as sched
+        task = {"id": "T-001", "template": "quick"}
+        ok, reason = sched.check_design_gate(task)
+        assert ok is True
+        assert "exempt" in reason
+
+    def test_cron_auto_exempt(self):
+        import scheduler as sched
+        task = {"id": "T-001", "template": "cron-auto"}
+        ok, reason = sched.check_design_gate(task)
+        assert ok is True
+
+    def test_has_design_ref(self):
+        import scheduler as sched
+        task = {"id": "T-001", "template": "standard-dev", "design_ref": "D-001"}
+        ok, reason = sched.check_design_gate(task)
+        assert ok is True
+        assert "design ref" in reason
+
+    def test_has_architect_report(self, tmp_path, monkeypatch):
+        import scheduler as sched
+        reports_dir = tmp_path / "reports"
+        reports_dir.mkdir()
+        monkeypatch.setattr(sched, "REPORTS_DIR", reports_dir)
+        (reports_dir / "T-001-architect-123.json").write_text('{"task_id":"T-001"}')
+        task = {"id": "T-001", "template": "standard-dev"}
+        ok, reason = sched.check_design_gate(task)
+        assert ok is True
+        assert "architect report" in reason
+
+    def test_has_architect_in_history(self):
+        import scheduler as sched
+        task = {"id": "T-001", "template": "standard-dev",
+                "orchestration": {"history": [{"role": "architect", "verdict": "pass"}]}}
+        ok, reason = sched.check_design_gate(task)
+        assert ok is True
+
+    def test_emergency_exempt(self):
+        import scheduler as sched
+        task = {"id": "T-001", "template": "standard-dev", "emergency": True}
+        ok, reason = sched.check_design_gate(task)
+        assert ok is True
+        assert "emergency" in reason
+
+    def test_needs_design_false(self):
+        import scheduler as sched
+        task = {"id": "T-001", "template": "standard-dev", "needs_design": False}
+        ok, reason = sched.check_design_gate(task)
+        assert ok is True
+
+    def test_no_design_fails(self, tmp_path, monkeypatch):
+        import scheduler as sched
+        reports_dir = tmp_path / "reports"
+        reports_dir.mkdir()
+        monkeypatch.setattr(sched, "REPORTS_DIR", reports_dir)
+        task = {"id": "T-001", "template": "standard-dev",
+                "orchestration": {"history": []}}
+        ok, reason = sched.check_design_gate(task)
+        assert ok is False
+        assert "no design document" in reason
+
+    def test_feature_flag_disabled(self, monkeypatch):
+        import scheduler as sched
+        monkeypatch.setattr(sched, "DESIGN_GATE_ENABLED", False)
+        task = {"id": "T-001", "template": "standard-dev"}
+        ok, reason = sched.check_design_gate(task)
+        assert ok is True
+        assert "feature flag" in reason
+
+
+class TestCheckDocTriplet:
+    """Test check_doc_triplet() function."""
+
+    def test_quick_exempt(self):
+        import scheduler as sched
+        task = {"id": "T-001", "template": "quick"}
+        ok, missing = sched.check_doc_triplet(task)
+        assert ok is True
+        assert missing == []
+
+    def test_emergency_exempt(self):
+        import scheduler as sched
+        task = {"id": "T-001", "template": "standard-dev", "emergency": True}
+        ok, missing = sched.check_doc_triplet(task)
+        assert ok is True
+
+    def test_has_devlog_and_design_ref(self, tmp_path, monkeypatch):
+        import scheduler as sched
+        reports_dir = tmp_path / "reports"
+        reports_dir.mkdir()
+        monkeypatch.setattr(sched, "REPORTS_DIR", reports_dir)
+        report = {"files_changed": ["src/main.py", "DEVLOG.md"]}
+        task = {"id": "T-001", "template": "standard-dev", "design_ref": "D-001"}
+        ok, missing = sched.check_doc_triplet(task, report)
+        assert ok is True
+
+    def test_missing_devlog(self, tmp_path, monkeypatch):
+        import scheduler as sched
+        reports_dir = tmp_path / "reports"
+        reports_dir.mkdir()
+        monkeypatch.setattr(sched, "REPORTS_DIR", reports_dir)
+        report = {"files_changed": ["src/main.py"]}
+        task = {"id": "T-001", "template": "standard-dev", "design_ref": "D-001"}
+        ok, missing = sched.check_doc_triplet(task, report)
+        assert ok is False
+        assert "DEVLOG.md" in missing
+
+    def test_missing_design(self, tmp_path, monkeypatch):
+        import scheduler as sched
+        reports_dir = tmp_path / "reports"
+        reports_dir.mkdir()
+        monkeypatch.setattr(sched, "REPORTS_DIR", reports_dir)
+        report = {"files_changed": ["DEVLOG.md"]}
+        task = {"id": "T-001", "template": "standard-dev"}
+        ok, missing = sched.check_doc_triplet(task, report)
+        assert ok is False
+        assert any("ARCHITECTURE" in m for m in missing)
+
+    def test_feature_flag_disabled(self, monkeypatch):
+        import scheduler as sched
+        monkeypatch.setattr(sched, "DOC_TRIPLET_CHECK_ENABLED", False)
+        task = {"id": "T-001", "template": "standard-dev"}
+        ok, missing = sched.check_doc_triplet(task)
+        assert ok is True
+
+
+class TestDocRetryEscalation:
+    """Test doc retry counter and escalation to manual review."""
+
+    def test_developer_pass_missing_docs_sends_back(self, tmp_path, monkeypatch):
+        import scheduler as sched
+        reports_dir = tmp_path / "reports"
+        reports_dir.mkdir()
+        monkeypatch.setattr(sched, "REPORTS_DIR", reports_dir)
+        report = {"task_id": "T-001", "role": "developer", "verdict": "pass",
+                  "summary": "Done", "files_changed": ["main.py"]}
+        task = {"id": "T-001", "priority": "P1",
+                "workgroup": {"template": "standard-dev"},
+                "orchestration": {"iteration": 1, "history": []}}
+        decision = sched.make_decision(report, task)
+        assert decision.action == "dispatch_role"
+        assert decision.params["role"] == "developer"
+
+    def test_developer_pass_missing_docs_escalates_after_max_retry(self, tmp_path, monkeypatch):
+        import scheduler as sched
+        reports_dir = tmp_path / "reports"
+        reports_dir.mkdir()
+        monkeypatch.setattr(sched, "REPORTS_DIR", reports_dir)
+        report = {"task_id": "T-001", "role": "developer", "verdict": "pass",
+                  "summary": "Done again", "files_changed": ["main.py"]}
+        task = {"id": "T-001", "priority": "P1",
+                "workgroup": {"template": "standard-dev"},
+                "orchestration": {"iteration": 3, "history": [
+                    {"role": "developer", "verdict": "pass", "reason": "developer passed but missing docs: ['DEVLOG.md']"},
+                    {"role": "developer", "verdict": "pass", "reason": "developer passed but missing docs: ['DEVLOG.md']"},
+                ]}}
+        decision = sched.make_decision(report, task)
+        assert decision.action == "promote_to_review"
+
+    def test_tester_pass_l0_missing_docs_promotes_review(self, tmp_path, monkeypatch):
+        import scheduler as sched
+        reports_dir = tmp_path / "reports"
+        reports_dir.mkdir()
+        monkeypatch.setattr(sched, "REPORTS_DIR", reports_dir)
+        report = {"task_id": "T-001", "role": "tester", "verdict": "pass",
+                  "summary": "Tests passed", "files_changed": ["test.py"]}
+        # Use quick-like template that would get L0 but override to standard-dev
+        # Actually, use P2 + standard-dev with monkeypatch on determine_review_level
+        import brain_manager as bm
+        monkeypatch.setattr(bm, "determine_review_level", lambda t: "L0")
+        task = {"id": "T-001", "priority": "P2",
+                "workgroup": {"template": "standard-dev"},
+                "orchestration": {"iteration": 2, "history": []}}
+        decision = sched.make_decision(report, task)
+        assert decision.action == "promote_to_review"
+        assert "docs" in decision.reason.lower()

@@ -4,6 +4,11 @@
 
 ## 🔴 L0 MUST（违反即失败）
 
+### STD-002: 文档三件套随代码同步更新
+REQUIREMENTS.md、ARCHITECTURE.md、DEVLOG.md 随代码变更同步更新。
+文档从原始设计提取，不从代码反推。
+⚠️ 调度器会检查文档完整性，缺少文档的报告会被打回。
+
 ### STD-005: 已知项目必须在 dev-dir 中开发
 对于已配置 dev-workdir 的项目，所有代码变更必须在 dev-dir（开发目录）中进行，禁止直接修改 prod 部署目录。
 已知有 dev-workdir 的项目：
@@ -14,10 +19,6 @@
 
 ### STD-001: 设计→开发→验收三阶段流程
 遵循设计（文档先行）→ 开发（按 checklist 推进）→ 验收（对照 checklist 验证）的标准流程。
-
-### STD-002: 文档三件套随代码同步更新
-REQUIREMENTS.md、ARCHITECTURE.md、DEVLOG.md 随代码变更同步更新。
-文档从原始设计提取，不从代码反推。
 
 ### STD-003: 自验 cases 从需求文档提取
 验收场景和测试数据必须从关联的需求文档中提取，不能自行编造。

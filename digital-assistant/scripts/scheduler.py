@@ -352,6 +352,170 @@ def is_quick_task(task: dict) -> bool:
 
 
 # ──────────────────────────────────────────
+# Phase 1: Design gate & doc triplet checks
+# Feature flags for rollback support
+# ──────────────────────────────────────────
+
+DESIGN_GATE_ENABLED = os.environ.get("DESIGN_GATE_ENABLED", "1") != "0"
+DOC_TRIPLET_CHECK_ENABLED = os.environ.get("DOC_TRIPLET_CHECK_ENABLED", "1") != "0"
+
+# Max times a developer can be sent back for doc completion before escalating
+MAX_DOC_RETRY = 2
+
+
+def check_design_gate(task: dict) -> tuple[bool, str]:
+    """Check if a standard-dev task has design documentation before dispatch.
+
+    Returns:
+        (pass, reason) — pass=True means task can be dispatched to developer
+    """
+    if not DESIGN_GATE_ENABLED:
+        return True, "design gate disabled via feature flag"
+
+    template = task.get("template",
+                task.get("workgroup", {}).get("template", "standard-dev"))
+
+    # quick/cron-auto exempt
+    if template in ("quick", "cron-auto"):
+        return True, "quick/cron-auto exempt"
+
+    task_id = task["id"]
+
+    # Check 1: explicit design_ref or design_doc
+    design_ref = task.get("design_ref") or task.get("design_doc")
+    if design_ref:
+        return True, f"has design ref: {design_ref}"
+
+    # Check 2: architect report exists (been through architect flow)
+    architect_reports = list(REPORTS_DIR.glob(f"{task_id}-architect-*.json"))
+    if architect_reports:
+        return True, "has architect report"
+
+    # Check 3: task has orchestration history with architect role
+    orch = task.get("orchestration", {})
+    history = orch.get("history", [])
+    has_architect = any(h.get("role") == "architect" for h in history)
+    if has_architect:
+        return True, "has architect in orchestration history"
+
+    # Check 4: emergency exemption
+    if task.get("emergency"):
+        return True, "emergency exempt (must document post-hoc)"
+
+    # Check 5: task explicitly marked as needs_design=False
+    if task.get("needs_design") is False:
+        return True, "explicitly marked needs_design=False"
+
+    # Not passed
+    return False, "no design document found — must go through architect/brain-trust first"
+
+
+def check_doc_triplet(task: dict, report: dict | None = None) -> tuple[bool, list[str]]:
+    """Check document triplet completeness for a task.
+
+    Checks both report files_changed AND filesystem for DEVLOG/ARCHITECTURE/REQUIREMENTS.
+
+    Returns:
+        (complete, missing_docs) — complete=True means docs are sufficient
+    """
+    if not DOC_TRIPLET_CHECK_ENABLED:
+        return True, []
+
+    template = task.get("template",
+                task.get("workgroup", {}).get("template", "standard-dev"))
+
+    # quick/cron-auto don't require triplet
+    if template in ("quick", "cron-auto"):
+        return True, []
+
+    # emergency tasks get doc_debt instead of blocking
+    if task.get("emergency"):
+        return True, []
+
+    task_id = task["id"]
+    has_devlog = False
+    has_design = bool(task.get("design_ref") or task.get("design_doc"))
+
+    # Scan reports for this task
+    reports = list(REPORTS_DIR.glob(f"{task_id}-*.json"))
+    for rp in reports:
+        try:
+            data = json.loads(rp.read_text(encoding="utf-8"))
+            files = data.get("files_changed", [])
+            for f in files:
+                f_upper = f.upper()
+                if "DEVLOG" in f_upper:
+                    has_devlog = True
+                if "ARCHITECTURE" in f_upper or "REQUIREMENTS" in f_upper:
+                    has_design = True
+        except Exception:
+            pass
+
+    # Also check current report if provided
+    if report:
+        files = report.get("files_changed", [])
+        for f in files:
+            f_upper = f.upper()
+            if "DEVLOG" in f_upper:
+                has_devlog = True
+            if "ARCHITECTURE" in f_upper or "REQUIREMENTS" in f_upper:
+                has_design = True
+
+    # Filesystem fallback: scan common project directories
+    project_dirs_to_check = set()
+    all_files = []
+    for rp in reports:
+        try:
+            data = json.loads(rp.read_text(encoding="utf-8"))
+            all_files.extend(data.get("files_changed", []))
+        except Exception:
+            pass
+    if report:
+        all_files.extend(report.get("files_changed", []))
+
+    for f in all_files:
+        p = Path(f)
+        # Look for typical project root indicators
+        for parent in p.parents:
+            if (parent / ".git").exists():
+                project_dirs_to_check.add(parent)
+                break
+
+    for proj_dir in project_dirs_to_check:
+        if not has_devlog:
+            for pattern in ["DEVLOG.md", "devlog.md", "docs/DEVLOG.md"]:
+                if (proj_dir / pattern).exists():
+                    has_devlog = True
+                    break
+        if not has_design:
+            for pattern in ["ARCHITECTURE.md", "REQUIREMENTS.md",
+                            "docs/ARCHITECTURE.md", "docs/REQUIREMENTS.md"]:
+                if (proj_dir / pattern).exists():
+                    has_design = True
+                    break
+
+    missing = []
+    if not has_devlog:
+        missing.append("DEVLOG.md")
+    if not has_design:
+        missing.append("ARCHITECTURE.md or design_ref")
+
+    return len(missing) == 0, missing
+
+
+def _count_doc_retries(task: dict) -> int:
+    """Count how many times a developer has been sent back for doc completion."""
+    orch = task.get("orchestration", {})
+    history = orch.get("history", [])
+    count = 0
+    for h in history:
+        reason = h.get("reason", "")
+        if "missing docs" in reason or "文档三件套不完整" in reason:
+            count += 1
+    return count
+
+
+# ──────────────────────────────────────────
 # Role determination
 # ──────────────────────────────────────────
 
@@ -626,9 +790,17 @@ def make_decision(report: dict | None, task: dict) -> Decision:
             # Check review level
             review_level = bm.determine_review_level(task)
             if review_level in ("L0", "L1"):
+                # ── Phase 1: L0/L1 auto-approve must check docs ──
+                doc_ok, doc_missing = check_doc_triplet(task, report)
+                if not doc_ok:
+                    return Decision(
+                        action="promote_to_review",
+                        params={"summary": f"⚠️ tester passed but docs incomplete ({', '.join(doc_missing)}). {summary}"},
+                        reason=f"tester passed but docs missing {doc_missing}, upgrading to manual review"
+                    )
                 return Decision(
                     action="mark_done",
-                    reason=f"tester passed, review level {review_level}"
+                    reason=f"tester passed, docs verified, review level {review_level}"
                 )
             else:
                 return Decision(
@@ -658,10 +830,37 @@ def make_decision(report: dict | None, task: dict) -> Decision:
                     reason=f"developer passed, {template} template needs no tester"
                 )
             else:
+                # ── Phase 1: doc triplet check before dispatching tester ──
+                doc_ok, doc_missing = check_doc_triplet(task, report)
+                if not doc_ok:
+                    retry_count = _count_doc_retries(task)
+                    if retry_count >= MAX_DOC_RETRY:
+                        # Escalate to manual review after max retries
+                        return Decision(
+                            action="promote_to_review",
+                            params={"summary": f"⚠️ 文档三件套不完整 (已打回{retry_count}次，升级人工审核): 缺少 {', '.join(doc_missing)}. Developer summary: {summary}"},
+                            reason=f"developer passed but missing docs after {retry_count} retries: {doc_missing} — escalating to manual review"
+                        )
+                    return Decision(
+                        action="dispatch_role",
+                        params={
+                            "role": "developer",
+                            "context": (
+                                f"⚠️ 文档三件套不完整，缺少: {', '.join(doc_missing)}\n\n"
+                                f"请补全以下文档后重新提交报告:\n"
+                                f"1. DEVLOG.md — 记录开发过程、Phase、checkbox 任务清单\n"
+                                f"2. ARCHITECTURE.md — 方案文档（如已有 design_ref 可跳过）\n\n"
+                                f"之前的工作成果: {summary}"
+                            ),
+                        },
+                        reason=f"developer passed but missing docs: {doc_missing} — dispatching back to complete docs"
+                    )
+
+                # Docs verified, dispatch tester
                 return Decision(
                     action="dispatch_role",
                     params={"role": "tester", "context": f"Developer completed:\n{summary}"},
-                    reason="developer passed, dispatching tester"
+                    reason="developer passed, docs verified, dispatching tester"
                 )
         elif verdict == "fail":
             # Count consecutive developer failures
@@ -1043,12 +1242,42 @@ def generate_worker_prompt_v2(task: dict, role: str = "developer", prior_context
         lines += [
             "### Your Mission (Developer)",
             "",
-            "1. Implement the required functionality",
-            "2. Write tests to verify your implementation",
-            "3. Run tests and ensure they pass",
-            "4. Document any important decisions or changes",
-            "",
         ]
+        # Add design doc references if available
+        design_ref = task.get("design_ref") or task.get("design_doc")
+        if design_ref:
+            lines += [
+                f"1. Read the design documents first:",
+                f"   - Design doc: `{design_ref}`",
+                "2. Implement the required functionality",
+                "3. Write tests to verify your implementation",
+                "4. Run tests and ensure they pass",
+                "5. Document any important decisions or changes",
+                "",
+            ]
+        else:
+            lines += [
+                "1. Implement the required functionality",
+                "2. Write tests to verify your implementation",
+                "3. Run tests and ensure they pass",
+                "4. Document any important decisions or changes",
+                "",
+            ]
+        # ── Phase 1: hardcode doc triplet requirement in worker prompt ──
+        if template not in ("quick", "cron-auto"):
+            lines += [
+                "**📋 文档三件套（MUST — 不写不算完成）**:",
+                "- **DEVLOG.md**: 开发日志，记录 Phase、checkbox 任务清单、关键决策",
+                "- **ARCHITECTURE.md**: 方案文档（如任务有 design_ref 则可跳过）",
+                "- **REQUIREMENTS.md**: 需求文档（如任务描述已充分则可跳过）",
+                "文档路径: 项目根目录或 task 关联目录",
+                "⚠️ 调度器会检查文档完整性，缺少文档的报告会被打回。",
+                "",
+                "**Git Commit 规范**:",
+                "- commit message 必须包含 Task ID，格式: `feat(task_id): 描述`",
+                "- 例如: `feat(T-20260401-003): add design gate check`",
+                "",
+            ]
     elif role == "tester":
         lines += [_generate_tester_guidance(task), ""]
 
@@ -1488,15 +1717,25 @@ def run_scheduler(
             skipped_cap.append(task)
             continue
 
+        # 4.5 Design gate check (Phase 1)
+        initial_role = get_initial_role(task)
+        gate_pass, gate_reason = check_design_gate(task)
+        if not gate_pass:
+            # Force architect role instead of developer
+            initial_role = "architect"
+
         # 5. Dispatch
         if not dry_run:
             try:
-                bm.transition_task(task["id"], "executing", note="scheduler dispatch")
+                note = "scheduler dispatch"
+                if not gate_pass:
+                    note = f"scheduler dispatch (architect gate: {gate_reason})"
+                bm.transition_task(task["id"], "executing", note=note)
             except Exception as exc:
                 errors.append({"task": task, "error": str(exc)})
                 continue
 
-        dispatched.append(generate_spawn_instruction(task, parent_session_id, role=get_initial_role(task)))
+        dispatched.append(generate_spawn_instruction(task, parent_session_id, role=initial_role))
 
     # 6. Review follow-up check
     review_pending = check_completed_tasks()

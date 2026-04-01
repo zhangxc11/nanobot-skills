@@ -50,3 +50,8 @@ Worker 执行不同类型任务时应按需加载对应规则（开发→dev-wor
 ### DISP-011: 智囊团与调度器分工
 具体执行任务（开发/修订/审计等）交调度器跑。
 智囊团（方案设计/cross-check）由主 session 自己起 subagent 编排。
+
+### DISP-012: INBOX 巡检
+每轮调度开始时，先检查 INBOX 待处理消息（`python3 scripts/inbox_helper.py pending`）。
+LLM 全权决策如何处理每条消息（不硬编码路由）。处理完标记 processed。
+INBOX 异常不阻塞调度主流程（降级安全）。
