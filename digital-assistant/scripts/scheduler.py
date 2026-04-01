@@ -359,6 +359,22 @@ def is_quick_task(task: dict) -> bool:
 DESIGN_GATE_ENABLED = os.environ.get("DESIGN_GATE_ENABLED", "1") != "0"
 DOC_TRIPLET_CHECK_ENABLED = os.environ.get("DOC_TRIPLET_CHECK_ENABLED", "1") != "0"
 
+# Cross-check Phase feature flags (MF-2: rollback support for cross-check remediation)
+# Master flag: controls all cross-check Layer 1 validations
+CROSS_CHECK_ENABLED = os.environ.get("CROSS_CHECK_ENABLED", "1") != "0"
+# Test evidence validation for tester reports
+TEST_EVIDENCE_CHECK_ENABLED = os.environ.get("TEST_EVIDENCE_CHECK_ENABLED", "1") != "0"
+
+# Rollback strategies (documented per MF-2):
+# Phase 1 rollback: DESIGN_GATE_ENABLED=0 + DOC_TRIPLET_CHECK_ENABLED=0
+#   → removes design gate + doc triplet checks
+# Phase 2 rollback: TEST_EVIDENCE_CHECK_ENABLED=0
+#   → bypasses test_evidence validation for tester reports
+# Phase 3 rollback: stop cron job (`crontab -l | grep -v cross_check_auditor | crontab -`)
+#   → disables independent audit process
+# Master rollback: CROSS_CHECK_ENABLED=0
+#   → disables all cross-check Layer 1 validations at once
+
 # Max times a developer can be sent back for doc completion before escalating
 MAX_DOC_RETRY = 2
 
@@ -511,6 +527,18 @@ def _count_doc_retries(task: dict) -> int:
     for h in history:
         reason = h.get("reason", "")
         if "missing docs" in reason or "文档三件套不完整" in reason:
+            count += 1
+    return count
+
+
+def _count_evidence_retries(task: dict) -> int:
+    """Count how many times a tester has been sent back for test evidence."""
+    orch = task.get("orchestration", {})
+    history = orch.get("history", [])
+    count = 0
+    for h in history:
+        reason = h.get("reason", "")
+        if "no test_evidence" in reason or "missing test_evidence" in reason:
             count += 1
     return count
 
@@ -787,6 +815,38 @@ def make_decision(report: dict | None, task: dict) -> Decision:
     # Tester role
     if role == "tester":
         if verdict == "pass":
+            # ── Cross-check Phase 2: test_evidence validation ──
+            if CROSS_CHECK_ENABLED and TEST_EVIDENCE_CHECK_ENABLED:
+                template = task.get("workgroup", {}).get("template", "") or task.get("template", "")
+                if template not in ("quick", "cron-auto"):
+                    evidence = report.get("test_evidence", []) if report else []
+                    if not evidence:
+                        retry_count = _count_evidence_retries(task)
+                        if retry_count < MAX_DOC_RETRY:
+                            return Decision(
+                                action="dispatch_role",
+                                params={
+                                    "role": "tester",
+                                    "context": (
+                                        "⚠️ 测试报告缺少 test_evidence 字段。请补充测试执行证据后重新提交。\n\n"
+                                        "报告中必须包含 test_evidence 字段，格式:\n"
+                                        '"test_evidence": [\n'
+                                        '    {"type": "command_output", "command": "pytest tests/", "result": "5 passed"},\n'
+                                        '    {"type": "manual_test", "description": "验证功能", "result": "OK"}\n'
+                                        "]\n\n"
+                                        f"之前的测试结果: {summary}"
+                                    ),
+                                },
+                                reason=f"tester passed but no test_evidence (retry {retry_count + 1}/{MAX_DOC_RETRY})"
+                            )
+                        else:
+                            # Exceeded max retries, escalate to human review
+                            return Decision(
+                                action="promote_to_review",
+                                params={"summary": f"⚠️ tester passed but no test_evidence after {retry_count} retries. {summary}"},
+                                reason=f"tester passed but missing test_evidence, max retries exceeded, upgrading to manual review"
+                            )
+
             # Check review level
             review_level = bm.determine_review_level(task)
             if review_level in ("L0", "L1"):
@@ -1178,6 +1238,16 @@ def _generate_tester_guidance(task: dict) -> str:
 - **Commit 格式**: 每个 commit 是有意义的独立单元
 - **文档更新**: 必要的文档是否按需更新
 - **测试覆盖**: 验收基于真实执行结果，非纯 mock
+
+**测试证据要求（MUST）：**
+报告中必须包含 `test_evidence` 字段，记录实际执行的测试及结果：
+```json
+"test_evidence": [
+    {"type": "command_output", "command": "pytest tests/", "result": "5 passed"},
+    {"type": "manual_test", "description": "验证飞书通知发送", "result": "OK"}
+]
+```
+⚠️ 无 test_evidence 的报告会被打回。每项 evidence 必须基于真实执行。
 
 > 注意：过程性规则（如使用哪个环境、哪个分支）由 Dispatcher 校验，你不需要检查。
 > 如果发现规则违反，在报告 issues 中标注。

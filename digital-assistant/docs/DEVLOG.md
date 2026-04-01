@@ -542,3 +542,45 @@ git commit -m "feat(digital-assistant): add cross-check/dispatcher/webchat rules
 - [D-20260331-003](../../data/brain/designs/D-20260331-003-summary.md) — 未提交代码抢救方案
 - [D-20260331-004](../../data/brain/designs/D-20260331-004-review-r2.md) — 调度器日报/周报设计
 - [dev-workflow-audit-20260401.md](../../data/brain/designs/dev-workflow-audit-20260401.md) — Dev Workflow 合规审计报告
+
+---
+
+## Phase 13: Cross-Check 整改剩余 Must Fix 项 (2026-04-01)
+
+**目标**: 实现 cross-check-remediation-review 中 T-003 未覆盖的剩余 Must Fix 项（MF-1, MF-2, MF-4）
+
+**设计依据**:
+- `data/brain/designs/cross-check-remediation-designer.md`
+- `data/brain/designs/cross-check-remediation-review.md`
+
+### 任务清单
+
+#### MF-1: Layer 2 审计进程独立性重构
+- [x] 创建 `scripts/cross_check_auditor.py` — 独立审计进程
+  - 由系统级 crontab 触发（非调度器 prompt）
+  - 直接扫描文件系统获取第一手数据（git log, 文件存在性）
+  - 直接调用飞书 API 发送告警（不经过调度器）
+  - 5 个审计探针: DesignGateProbe, DocTripletProbe, TestEvidenceProbe, GitCommitProbe, L0ApprovalProbe
+  - CLI: scan / report / alert / install-cron
+- [x] 创建 `scripts/test_cross_check_auditor.py` — 审计进程测试
+
+#### MF-2: Cross-check 回滚策略 + Feature Flag
+- [x] 新增 `CROSS_CHECK_ENABLED` 主控 feature flag — 一键关闭所有 cross-check Layer 1 校验
+- [x] 新增 `TEST_EVIDENCE_CHECK_ENABLED` feature flag — 控制 test_evidence 验证
+- [x] 在 scheduler.py 中记录各 Phase 回滚策略注释
+- [x] 实现 test_evidence 校验: tester pass 时检查 test_evidence 字段
+  - quick/cron-auto 豁免
+  - 重试计数器 + MAX_DOC_RETRY 升级人工审核
+- [x] 更新 `_generate_tester_guidance()` 增加 test_evidence MUST 要求
+- [x] 新增 `_count_evidence_retries()` 函数
+
+#### MF-4: 两方案依赖关系文档化
+- [x] 更新 ARCHITECTURE.md 增加依赖关系图和实施顺序说明
+- [x] 更新 DEVLOG.md 记录本 Phase
+
+### 测试结果
+- 24 个新增测试（审计探针 + feature flag + test_evidence）
+- 总计 211 个测试全部通过
+- 覆盖: 审计探针各路径、feature flag 开关、test_evidence 打回/升级/豁免、CLI
+
+**相关任务**: T-20260401-004

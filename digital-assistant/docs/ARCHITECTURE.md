@@ -775,3 +775,52 @@ dev-workflow 合规审计（2026-04-01）发现合规率仅 19.4%。根因分析
 - 文档生成自动化（模板引擎 + LLM 填充）
 - 流程可视化监控（Dashboard + 卡点告警）
 - 规则引擎 + LLM 混合决策
+
+---
+
+## Cross-Check 整改: 实施依赖关系与顺序 (MF-4)
+
+### 两套整改方案关系
+
+| 方案 | 聚焦 | 修改核心 |
+|------|------|---------|
+| process-failure | 调度器核心 5 环节 Layer 1 硬卡点 | scheduler.py make_decision/run_scheduler |
+| cross-check-remediation | 剩余 6 环节 + 统一 Layer 2/3 | cross_check_auditor.py + scheduler.py 增强 |
+
+### 实施顺序（依赖链）
+
+```
+process-failure Phase 1 (T-003, ✅ 已完成)
+  → check_design_gate, check_doc_triplet, feature flags
+  → DESIGN_GATE_ENABLED, DOC_TRIPLET_CHECK_ENABLED
+
+cross-check Phase 1 (T-004, 本次)
+  → CROSS_CHECK_ENABLED, TEST_EVIDENCE_CHECK_ENABLED
+  → cross_check_auditor.py (独立审计)
+  → test_evidence 校验
+
+两方案 Phase 2 (交替推进):
+  → process-failure Phase 2: classify_task_type, design 状态机
+  → cross-check Phase 2: INBOX 路由, prompt schema, sync_audit
+  → 注意: 都修改 scheduler.py，需串行合并避免冲突
+
+两方案 Phase 3 (长期):
+  → 合规看板, CIL 探针, 每日检查增强
+```
+
+### scheduler.py 合并顺序
+
+Phase 2 开发时，两方案都修改 scheduler.py 的多个函数。建议：
+1. 先完成 process-failure Phase 2（状态机变更影响大）
+2. 在其基础上叠加 cross-check Phase 2 修改
+3. 每次合并后运行完整测试套件确认无回归
+
+### Feature Flag 回滚矩阵
+
+| Flag | 控制范围 | 回滚方式 |
+|------|---------|---------|
+| `DESIGN_GATE_ENABLED=0` | 设计门禁 | Phase 1 回滚 |
+| `DOC_TRIPLET_CHECK_ENABLED=0` | 文档三件套检查 | Phase 1 回滚 |
+| `CROSS_CHECK_ENABLED=0` | 所有 cross-check Layer 1 | 主控回滚 |
+| `TEST_EVIDENCE_CHECK_ENABLED=0` | test_evidence 校验 | Phase 2 回滚 |
+| 停止 cron job | 独立审计进程 | Phase 3 回滚 |
