@@ -1733,6 +1733,7 @@ class TestMakeDecision:
             "role": "tester",
             "verdict": "pass",
             "summary": "All tests passed",
+            "test_evidence": [{"type": "command_output", "command": "pytest", "result": "5 passed"}],
         }
         task = {
             "id": "T-001",
@@ -1751,6 +1752,7 @@ class TestMakeDecision:
             "role": "tester",
             "verdict": "pass",
             "summary": "Tests passed",
+            "test_evidence": [{"type": "command_output", "command": "pytest", "result": "3 passed"}],
         }
         task = {
             "id": "T-001",
@@ -2061,6 +2063,7 @@ class TestMakeDecision:
             "role": "tester",
             "verdict": "pass",
             "summary": "All tests passed on retry",
+            "test_evidence": [{"type": "manual_test", "description": "retry test", "result": "OK"}],
         }
         task = {
             "id": "T-006",
@@ -2297,6 +2300,7 @@ class TestHandleWorkerCompletion:
                 "role": "tester",
                 "verdict": "pass",
                 "summary": "All tests passed",
+                "test_evidence": [{"type": "command_output", "command": "pytest", "result": "5 passed"}],
             }, f)
 
         result = sched.handle_worker_completion("T-001", "tester")
@@ -2613,7 +2617,8 @@ class TestDocRetryEscalation:
         reports_dir.mkdir()
         monkeypatch.setattr(sched, "REPORTS_DIR", reports_dir)
         report = {"task_id": "T-001", "role": "tester", "verdict": "pass",
-                  "summary": "Tests passed", "files_changed": ["test.py"]}
+                  "summary": "Tests passed", "files_changed": ["test.py"],
+                  "test_evidence": [{"type": "command_output", "command": "pytest", "result": "OK"}]}
         # Use quick-like template that would get L0 but override to standard-dev
         # Actually, use P2 + standard-dev with monkeypatch on determine_review_level
         import brain_manager as bm

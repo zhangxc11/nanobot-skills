@@ -542,3 +542,26 @@ git commit -m "feat(digital-assistant): add cross-check/dispatcher/webchat rules
 - [D-20260331-003](../../data/brain/designs/D-20260331-003-summary.md) — 未提交代码抢救方案
 - [D-20260331-004](../../data/brain/designs/D-20260331-004-review-r2.md) — 调度器日报/周报设计
 - [dev-workflow-audit-20260401.md](../../data/brain/designs/dev-workflow-audit-20260401.md) — Dev Workflow 合规审计报告
+
+---
+
+## T-20260401-009: 测试证据验证机制
+
+**Date**: 2026-04-01 | **Status**: ✅ Complete
+
+### 目标
+Cross Check 审计环节6发现 tester 报告缺少 test_evidence 字段，无法验证测试是否真正执行。实现 test_evidence 强制校验。
+
+### 修改清单
+1. `scheduler.py` L361: 新增 `TEST_EVIDENCE_ENABLED` feature flag
+2. `scheduler.py` L366: 新增 `MAX_EVIDENCE_RETRY = 2` 常量
+3. `scheduler.py` L521-530: 新增 `_count_evidence_retries()` 函数
+4. `scheduler.py` L805-840: make_decision() tester pass 分支增加 evidence 校验
+5. `scheduler.py` L1226-1249: `_generate_tester_guidance()` 追加 evidence 格式要求
+6. `test_scheduler_evidence.py`: 20 个新测试用例
+7. 更新 6 个已有测试用例添加 test_evidence 字段
+8. `ARCHITECTURE.md`: 新增 §7 测试证据验证机制 + 更新 Feature Flag 表
+
+### 测试结果
+- 新增测试: 20 passed
+- 全量回归: 236 passed, 0 failed

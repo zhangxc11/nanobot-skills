@@ -726,7 +726,7 @@ dev-workflow 合规审计（2026-04-01）发现合规率仅 19.4%。根因分析
 
 ### 5. Feature Flag 回滚机制
 
-**位置**: `scheduler.py` L359-360
+**位置**: `scheduler.py` L358-366
 
 **目的**: 所有新增卡点可通过环境变量一键关闭，实现快速回滚（reviewer Must Fix 项）。
 
@@ -734,8 +734,9 @@ dev-workflow 合规审计（2026-04-01）发现合规率仅 19.4%。根因分析
 |------|---------|--------|---------|
 | `DESIGN_GATE_ENABLED` | `DESIGN_GATE_ENABLED` | `"1"` (开启) | `check_design_gate()` |
 | `DOC_TRIPLET_CHECK_ENABLED` | `DOC_TRIPLET_CHECK_ENABLED` | `"1"` (开启) | `check_doc_triplet()` |
+| `TEST_EVIDENCE_ENABLED` | `TEST_EVIDENCE_ENABLED` | `"1"` (开启) | tester pass 时的 test_evidence 校验 |
 
-**关闭方式**: `export DESIGN_GATE_ENABLED=0` 或 `export DOC_TRIPLET_CHECK_ENABLED=0`
+**关闭方式**: `export DESIGN_GATE_ENABLED=0` 或 `export DOC_TRIPLET_CHECK_ENABLED=0` 或 `export TEST_EVIDENCE_ENABLED=0`
 
 **设计决策**: 使用环境变量而非配置文件，因为：
 - 无需修改代码或配置文件即可回滚
@@ -756,12 +757,32 @@ dev-workflow 合规审计（2026-04-01）发现合规率仅 19.4%。根因分析
 
 **内容**: 描述设计门禁机制、architect 重定向行为、emergency 豁免条件。
 
+### 7. 测试证据验证机制 (T-20260401-009)
+
+**位置**: `scheduler.py` make_decision() tester pass 分支
+
+**目的**: 强制 tester 提供测试执行证据（test_evidence），防止未经真实测试就报 pass（G-003 违规）。
+
+**验证逻辑**:
+1. tester verdict=pass 时，检查报告中 `test_evidence` 或 `test_results` 字段
+2. 要求为非空 list，每项必须有 `type` 和 `result` 字段
+3. 无证据 → 打回 tester 补充（最多 MAX_EVIDENCE_RETRY=2 次）
+4. 超限 → promote_to_review 升级人工审核
+5. fail/blocked/partial 不受影响
+
+**辅助函数**: `_count_evidence_retries(task)` — 统计历史中 evidence 打回次数
+
+**Tester Guidance**: `_generate_tester_guidance()` 已追加 test_evidence 格式说明
+
+**Feature Flag**: `TEST_EVIDENCE_ENABLED`（默认开启，设 `"0"` 关闭）
+
 ### 整改效果与后续规划
 
 **Phase 1 止血效果**:
 - 新的 standard-dev 任务无设计文档 → 自动派 architect（不再跳过）
 - developer pass 但缺文档 → 打回补文档（不再直接流转 tester）
 - tester pass 但缺文档 → L0/L1 不自动通过（升级 review）
+- tester pass 但无测试证据 → 打回补充 test_evidence（超限升级 review）
 - 所有卡点可通过 feature flag 一键关闭（安全回滚）
 
 **Phase 2 加固规划**（1-2 周）:

@@ -358,9 +358,12 @@ def is_quick_task(task: dict) -> bool:
 
 DESIGN_GATE_ENABLED = os.environ.get("DESIGN_GATE_ENABLED", "1") != "0"
 DOC_TRIPLET_CHECK_ENABLED = os.environ.get("DOC_TRIPLET_CHECK_ENABLED", "1") != "0"
+TEST_EVIDENCE_ENABLED = os.environ.get("TEST_EVIDENCE_ENABLED", "1") != "0"
 
 # Max times a developer can be sent back for doc completion before escalating
 MAX_DOC_RETRY = 2
+# Max times a tester can be sent back for missing test_evidence before escalating
+MAX_EVIDENCE_RETRY = 2
 
 
 def check_design_gate(task: dict) -> tuple[bool, str]:
@@ -511,6 +514,18 @@ def _count_doc_retries(task: dict) -> int:
     for h in history:
         reason = h.get("reason", "")
         if "missing docs" in reason or "文档三件套不完整" in reason:
+            count += 1
+    return count
+
+
+def _count_evidence_retries(task: dict) -> int:
+    """Count how many times a tester has been sent back for missing test_evidence."""
+    orch = task.get("orchestration", {})
+    history = orch.get("history", [])
+    count = 0
+    for h in history:
+        reason = h.get("reason", "")
+        if "no test_evidence" in reason or "test_evidence" in reason:
             count += 1
     return count
 
@@ -787,6 +802,44 @@ def make_decision(report: dict | None, task: dict) -> Decision:
     # Tester role
     if role == "tester":
         if verdict == "pass":
+            # ── test_evidence validation ──
+            if TEST_EVIDENCE_ENABLED:
+                evidence = report.get("test_evidence") or report.get("test_results") or []
+                has_valid_evidence = (
+                    isinstance(evidence, list)
+                    and len(evidence) > 0
+                    and all(
+                        isinstance(e, dict) and e.get("type") and e.get("result")
+                        for e in evidence
+                    )
+                )
+                if not has_valid_evidence:
+                    retry_count = _count_evidence_retries(task)
+                    if retry_count >= MAX_EVIDENCE_RETRY:
+                        # Escalate to manual review after max retries
+                        return Decision(
+                            action="promote_to_review",
+                            params={"summary": f"⚠️ tester passed 但多次未提供 test_evidence (已打回{retry_count}次). {summary}"},
+                            reason=f"tester passed without test_evidence after {retry_count} retries — escalating"
+                        )
+                    return Decision(
+                        action="dispatch_role",
+                        params={
+                            "role": "tester",
+                            "context": (
+                                "⚠️ 测试报告缺少 test_evidence 字段。请补充测试执行证据。\n\n"
+                                "报告中必须包含 test_evidence 字段，格式如下：\n"
+                                '"test_evidence": [\n'
+                                '    {"type": "command_output", "command": "pytest tests/", "result": "5 passed"},\n'
+                                '    {"type": "manual_test", "description": "验证功能X", "result": "OK"}\n'
+                                "]\n\n"
+                                "⚠️ 无 test_evidence 的 pass 报告会被打回。\n\n"
+                                f"之前的测试结论: {summary}"
+                            ),
+                        },
+                        reason="tester passed but no test_evidence"
+                    )
+
             # Check review level
             review_level = bm.determine_review_level(task)
             if review_level in ("L0", "L1"):
@@ -907,6 +960,7 @@ def _send_feishu_notify(text: str, task_id: str = "") -> bool:
         result = subprocess.run(
             [
                 sys.executable, str(messenger_script),
+                "--app", "ST",
                 "send-text",
                 "--to", FEISHU_NOTIFY_RECIPIENT,
                 "--text", text,
@@ -1181,6 +1235,18 @@ def _generate_tester_guidance(task: dict) -> str:
 
 > 注意：过程性规则（如使用哪个环境、哪个分支）由 Dispatcher 校验，你不需要检查。
 > 如果发现规则违反，在报告 issues 中标注。
+
+**测试证据要求（MUST）**:
+报告中必须包含 test_evidence 字段，记录你实际执行的测试：
+```json
+"test_evidence": [
+    {"type": "command_output", "command": "pytest tests/", "result": "5 passed, 0 failed"},
+    {"type": "manual_test", "description": "验证功能X", "result": "OK"}
+]
+```
+支持的 type: command_output, manual_test, code_review, integration_test
+每个 evidence 必须有 type 和 result 字段。
+⚠️ 无 test_evidence 的 pass 报告会被打回。
 """
 
 
