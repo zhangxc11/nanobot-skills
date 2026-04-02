@@ -1576,38 +1576,50 @@ def _make_decision_legacy(report: dict, task: dict, role: str, verdict: str,
             if pl in ("PL2", "PL3"):
                 acceptance_plan = report.get("acceptance_plan")
                 if not acceptance_plan or not isinstance(acceptance_plan, list) or len(acceptance_plan) == 0:
-                    return Decision(
-                        action="dispatch_role",
-                        params={"role": "architect", "context": (
-                            "⚠️ PL2/PL3 任务必须产出 acceptance_plan（验收方案）。\n\n"
-                            "请在报告 JSON 中添加 acceptance_plan 字段，格式：\n"
-                            '"acceptance_plan": [\n'
-                            '    {"step_id": "T1", "description": "...", "category": "e2e", "expected_result": "..."},\n'
-                            '    {"step_id": "T2", "description": "...", "category": "unit", "expected_result": "..."}\n'
-                            "]\n\n"
-                            "每个步骤必须包含 step_id, description, category, expected_result。\n"
-                            "代码任务必须包含至少一个 category='e2e' 的步骤。"
-                        )},
-                        reason="architect passed but missing acceptance_plan for PL2/PL3 task"
-                    )
+                    retry_count = _count_acceptance_plan_retries(task)
+                    if retry_count >= MAX_ACCEPTANCE_PLAN_RETRY:
+                        # Exceeded retry limit → auto-generate fallback plan and continue
+                        acceptance_plan = _generate_default_acceptance_plan(task, level="standard")
+                        task["acceptance_plan"] = acceptance_plan
+                        bm.save_task(task)
+                    else:
+                        return Decision(
+                            action="dispatch_role",
+                            params={"role": "architect", "context": (
+                                "⚠️ PL2/PL3 任务必须产出 acceptance_plan（验收方案）。\n\n"
+                                "请在报告 JSON 中添加 acceptance_plan 字段，格式：\n"
+                                '"acceptance_plan": [\n'
+                                '    {"step_id": "T1", "description": "...", "category": "e2e", "expected_result": "..."},\n'
+                                '    {"step_id": "T2", "description": "...", "category": "unit", "expected_result": "..."}\n'
+                                "]\n\n"
+                                "每个步骤必须包含 step_id, description, category, expected_result。\n"
+                                "代码任务必须包含至少一个 category='e2e' 的步骤。"
+                            )},
+                            reason="architect passed but missing acceptance_plan for PL2/PL3 task"
+                        )
 
-                has_e2e = any(
-                    isinstance(s, dict) and s.get("category") == "e2e"
-                    for s in acceptance_plan
-                )
-                task_category = detect_task_category(task)
-                if task_category != "doc_only" and not has_e2e:
-                    return Decision(
-                        action="dispatch_role",
-                        params={"role": "architect", "context": (
-                            "⚠️ 代码任务的 acceptance_plan 必须包含至少一个 category='e2e' 的步骤。\n\n"
-                            "e2e 步骤应描述具体的端到端验证方式，例如：\n"
-                            '{"step_id": "T1", "description": "在 dev 环境部署并验证功能", '
-                            '"category": "e2e", "expected_result": "功能正常工作"}\n\n'
-                            "请补充 e2e 步骤后重新提交。"
-                        )},
-                        reason="architect acceptance_plan missing e2e steps for code task"
+                if acceptance_plan and isinstance(acceptance_plan, list) and len(acceptance_plan) > 0:
+                    has_e2e = any(
+                        isinstance(s, dict) and s.get("category") == "e2e"
+                        for s in acceptance_plan
                     )
+                    task_category = detect_task_category(task)
+                    if task_category != "doc_only" and not has_e2e:
+                        retry_count = _count_acceptance_plan_retries(task)
+                        if retry_count >= MAX_ACCEPTANCE_PLAN_RETRY:
+                            pass  # Exceeded retry limit → pass through
+                        else:
+                            return Decision(
+                                action="dispatch_role",
+                                params={"role": "architect", "context": (
+                                    "⚠️ 代码任务的 acceptance_plan 必须包含至少一个 category='e2e' 的步骤。\n\n"
+                                    "e2e 步骤应描述具体的端到端验证方式，例如：\n"
+                                    '{"step_id": "T1", "description": "在 dev 环境部署并验证功能", '
+                                    '"category": "e2e", "expected_result": "功能正常工作"}\n\n'
+                                    "请补充 e2e 步骤后重新提交。"
+                                )},
+                                reason="architect acceptance_plan missing e2e steps for code task"
+                            )
 
                 task["acceptance_plan"] = acceptance_plan
                 bm.save_task(task)
@@ -1738,7 +1750,18 @@ def _make_decision_legacy(report: dict, task: dict, role: str, verdict: str,
                 uncovered = plan_step_ids - covered_ids
                 coverage = len(covered_ids & plan_step_ids) / max(len(plan_step_ids), 1)
 
-                if coverage < 0.8:
+                # Dynamic threshold by PL (aligned with state machine)
+                pl = determine_process_level(task)
+                coverage_threshold = 1.0 if pl == "PL3" else 0.8
+
+                if coverage < coverage_threshold:
+                    retry_count = _count_coverage_retries(task)
+                    if retry_count >= MAX_COVERAGE_RETRY:
+                        return Decision(
+                            action="promote_to_review",
+                            params={"summary": f"⚠️ tester 覆盖率 {coverage:.0%} 不足，已打回{retry_count}次。未覆盖: {uncovered}"},
+                            reason=f"tester coverage {coverage:.0%} after {retry_count} retries — escalating"
+                        )
                     return Decision(
                         action="dispatch_role",
                         params={
@@ -1750,7 +1773,7 @@ def _make_decision_legacy(report: dict, task: dict, role: str, verdict: str,
                                 f"每条 evidence 必须包含 step_id 字段对应验收方案中的步骤。"
                             ),
                         },
-                        reason=f"tester evidence coverage {coverage:.0%} < 80%, uncovered: {uncovered}"
+                        reason=f"tester evidence coverage {coverage:.0%} < {coverage_threshold:.0%}, uncovered: {uncovered}"
                     )
 
             review_level = bm.determine_review_level(task)
@@ -1773,6 +1796,14 @@ def _make_decision_legacy(report: dict, task: dict, role: str, verdict: str,
                     reason=f"tester passed, promoting to {review_level} review"
                 )
         elif verdict == "fail":
+            # Ping-pong protection (aligned with state machine)
+            pingpong_count = _count_tester_developer_pingpong(task)
+            if pingpong_count >= MAX_TESTER_DEVELOPER_PINGPONG:
+                return Decision(
+                    action="promote_to_review",
+                    params={"summary": f"⚠️ tester↔developer 已往返 {pingpong_count} 次，升级人工审核。最近问题: {summary}"},
+                    reason=f"tester↔developer ping-pong {pingpong_count} times — escalating to review"
+                )
             return Decision(
                 action="dispatch_role",
                 params={
