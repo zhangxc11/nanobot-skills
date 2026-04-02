@@ -990,6 +990,49 @@ def make_decision(report: dict | None, task: dict) -> Decision:
                 # Log warnings but don't block — static rules provide L0 fallback
                 pass  # warnings are informational
 
+            # ── PL2/PL3: Check acceptance_plan existence and e2e steps ──
+            pl = determine_process_level(task)
+            if pl in ("PL2", "PL3"):
+                acceptance_plan = report.get("acceptance_plan")
+                if not acceptance_plan or not isinstance(acceptance_plan, list) or len(acceptance_plan) == 0:
+                    return Decision(
+                        action="dispatch_role",
+                        params={"role": "architect", "context": (
+                            "⚠️ PL2/PL3 任务必须产出 acceptance_plan（验收方案）。\n\n"
+                            "请在报告 JSON 中添加 acceptance_plan 字段，格式：\n"
+                            '"acceptance_plan": [\n'
+                            '    {"step_id": "T1", "description": "...", "category": "e2e", "expected_result": "..."},\n'
+                            '    {"step_id": "T2", "description": "...", "category": "unit", "expected_result": "..."}\n'
+                            "]\n\n"
+                            "每个步骤必须包含 step_id, description, category, expected_result。\n"
+                            "代码任务必须包含至少一个 category='e2e' 的步骤。"
+                        )},
+                        reason="architect passed but missing acceptance_plan for PL2/PL3 task"
+                    )
+
+                # Check for e2e steps (code tasks must have at least one)
+                has_e2e = any(
+                    isinstance(s, dict) and s.get("category") == "e2e"
+                    for s in acceptance_plan
+                )
+                task_category = detect_task_category(task)
+                if task_category != "doc_only" and not has_e2e:
+                    return Decision(
+                        action="dispatch_role",
+                        params={"role": "architect", "context": (
+                            "⚠️ 代码任务的 acceptance_plan 必须包含至少一个 category='e2e' 的步骤。\n\n"
+                            "e2e 步骤应描述具体的端到端验证方式，例如：\n"
+                            '{"step_id": "T1", "description": "在 dev 环境部署并验证功能", '
+                            '"category": "e2e", "expected_result": "功能正常工作"}\n\n'
+                            "请补充 e2e 步骤后重新提交。"
+                        )},
+                        reason="architect acceptance_plan missing e2e steps for code task"
+                    )
+
+                # Save acceptance_plan to task for tester injection
+                task["acceptance_plan"] = acceptance_plan
+                bm.save_task(task)
+
             rule_verdict = report.get("rule_verdict", {})
             worker_instructions = rule_verdict.get("worker_instructions", "").strip() if rule_verdict else ""
 
