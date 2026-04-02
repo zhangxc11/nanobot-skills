@@ -141,6 +141,55 @@ def detect_task_category(task: dict) -> str:
     return "backend_script"
 
 
+def determine_process_level(task: dict) -> str:
+    """PL0-PL3 四级流程分级。保守策略：无法判断时默认 PL2。
+
+    PL0: 快速任务，developer 直接完成，跳过 tester
+    PL1: 纯文档/调研/配置，developer 完成，跳过 tester（无代码信号）
+    PL2: 标准开发任务，architect → developer → tester 完整流程
+    PL3: 高风险/架构变更，完整流程 + 更严格的验收
+    """
+    # 手动覆盖
+    pl = task.get("process_level")
+    if pl in ("PL0", "PL1", "PL2", "PL3"):
+        return pl
+
+    priority = task.get("priority", "P2")
+    template = task.get("workgroup", {}).get("template", "") or task.get("template", "standard-dev")
+    title = task.get("title", "").lower()
+    desc = task.get("description", "").lower()
+    combined = f"{title} {desc}"
+
+    # PL3: P0 / 架构变更 / 批量开发 / 安全相关
+    if priority == "P0":
+        return "PL3"
+    if template == "batch-dev":
+        return "PL3"
+    pl3_keywords = ["架构", "architecture", "安全", "security", "批量", "重构核心"]
+    if any(kw in combined for kw in pl3_keywords):
+        return "PL3"
+
+    # PL0: quick/cron-auto 模板
+    if template in ("quick", "cron-auto"):
+        return "PL0"
+
+    # PL1: 纯文档/调研/配置（无代码信号）
+    code_signals = ["代码", "code", "实现", "implement", "修复", "fix", "bug",
+                    "开发", "develop", "功能", "feature", "重构", "refactor",
+                    ".py", ".ts", ".js", ".tsx", ".jsx", "scheduler", "前端", "后端", "api"]
+    has_code = any(kw in combined for kw in code_signals)
+
+    doc_signals = ["文档", "document", "调研", "research", "分析", "analysis",
+                   "报告", "report", "配置", "config", "整理", "梳理"]
+    has_doc = any(kw in combined for kw in doc_signals)
+
+    if has_doc and not has_code:
+        return "PL1"
+
+    # 默认 PL2（保守）
+    return "PL2"
+
+
 # ──────────────────────────────────────────
 # Dev environment test detection
 # ──────────────────────────────────────────
