@@ -500,9 +500,10 @@ def _detect_traits(text: str) -> dict:
         lower
     ))
     is_cron = bool(re.search(
-        r"定时|cron|日报|周报|定期|scheduled|recurring|自动任务",
+        r"定时|cron|日报|周报|定期|scheduled|recurring",
         lower
     ))
+    # 已移除 "自动任务" — 太泛化，导致误分类 (T-008)
     # Detect numeric todo count from description, e.g. "5条需求"
     todo_match = re.search(r"(\d+)\s*条", lower)
     related_todos = int(todo_match.group(1)) if todo_match else 0
@@ -597,6 +598,16 @@ def match_template(title: str, desc: str = "") -> dict:
     if not has_signal:
         result_template = "standard-dev"
         reason += " [no signal; defaulted to standard-dev]"
+
+    # ── cron-auto 准入门卫 (T-008) ──
+    # 如果最终结果是 cron-auto，做额外准入检查：必须有 cron 强信号才允许
+    if result_template == "cron-auto":
+        cron_strong_signals = ["cron", "定时", "定期", "scheduled", "recurring", "计划任务", "日报", "周报"]
+        has_strong_signal = any(sig in combined for sig in cron_strong_signals)
+        if not has_strong_signal:
+            result_template = "standard-dev"
+            reason += " [cron-auto gate: no strong cron signal, fallback to standard-dev]"
+            confidence = max(confidence - 0.2, 0.1)
 
     return {
         "template":   result_template,

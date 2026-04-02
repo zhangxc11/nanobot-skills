@@ -7,16 +7,13 @@ matching:
   keywords:
     - "定时"
     - "cron"
-    - "自动"
     - "日报"
     - "周报"
     - "定期"
     - "scheduled"
     - "recurring"
-    - "每天"
-    - "每周"
-    - "自动执行"
     - "计划任务"
+    # 已移除泛化词 (T-008): "自动", "每天", "每周", "自动执行"
   traits:
     estimated_time_max_minutes: 30
     involves_code: false

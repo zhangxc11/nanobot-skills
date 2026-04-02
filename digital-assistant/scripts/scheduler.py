@@ -360,10 +360,153 @@ DESIGN_GATE_ENABLED = os.environ.get("DESIGN_GATE_ENABLED", "1") != "0"
 DOC_TRIPLET_CHECK_ENABLED = os.environ.get("DOC_TRIPLET_CHECK_ENABLED", "1") != "0"
 TEST_EVIDENCE_ENABLED = os.environ.get("TEST_EVIDENCE_ENABLED", "1") != "0"
 
+# ── Cross-check master flag (T-006) ──
+CROSS_CHECK_ENABLED = os.environ.get("CROSS_CHECK_ENABLED", "1") != "0"
+# Template confirmation (T-006)
+TEMPLATE_CONFIRM_ENABLED = os.environ.get("TEMPLATE_CONFIRM_ENABLED", "1") != "0"
+TEMPLATE_CONFIDENCE_THRESHOLD = float(os.environ.get("TEMPLATE_CONFIDENCE_THRESHOLD", "0.3"))
+
+# Notification validation & irreversible operation confirmation (T-010)
+NOTIFICATION_VALIDATE_ENABLED = os.environ.get("NOTIFICATION_VALIDATE_ENABLED", "1") != "0"
+IRREVERSIBLE_CONFIRM_ENABLED = os.environ.get("IRREVERSIBLE_CONFIRM_ENABLED", "1") != "0"
+IRREVERSIBLE_ACTIONS = frozenset({"cancel", "reject"})
+
 # Max times a developer can be sent back for doc completion before escalating
 MAX_DOC_RETRY = 2
 # Max times a tester can be sent back for missing test_evidence before escalating
 MAX_EVIDENCE_RETRY = 2
+
+
+# ──────────────────────────────────────────
+# T-006: Template assignment cross-check
+# ──────────────────────────────────────────
+
+def confirm_template_assignment(task: dict) -> tuple[str, str, bool]:
+    """二次确认模板分配是否合理。
+
+    三层验证：
+      Layer A: confidence 阈值 — match_template 返回的 confidence < threshold 则标记可疑
+      Layer B: 规则交叉验证 — 用独立规则集对比当前模板
+      Layer C: (未来) LLM 语义分类 — 高风险场景兜底
+
+    Args:
+        task: 任务字典
+
+    Returns:
+        (confirmed_template, reason, was_changed)
+        - confirmed_template: 确认后的模板名
+        - reason: 确认/变更原因
+        - was_changed: 是否发生了模板变更
+    """
+    current_template = task.get("template",
+                        task.get("workgroup", {}).get("template", "standard-dev"))
+
+    if not TEMPLATE_CONFIRM_ENABLED or not CROSS_CHECK_ENABLED:
+        return current_template, "template confirmation disabled", False
+
+    title = task.get("title", "")
+    desc = task.get("description", "")
+    combined = (title + " " + desc).lower()
+
+    # ── Layer A: Confidence check ──
+    match_info = task.get("workgroup", {}).get("match_info", {})
+    confidence = match_info.get("confidence", None)
+
+    if confidence is None:
+        # No stored match_info — re-compute
+        try:
+            confidence = bm.match_template(title, desc).get("confidence", 0.0)
+        except Exception:
+            confidence = 0.0
+
+    low_confidence = confidence < TEMPLATE_CONFIDENCE_THRESHOLD
+
+    # ── Layer B: 独立规则交叉验证 ──
+    rule_suggestion = _rule_based_template_check(combined, current_template)
+
+    # ── 决策逻辑 ──
+    if not low_confidence and rule_suggestion == current_template:
+        # 双重确认一致 → 通过
+        return current_template, f"confirmed (confidence={confidence:.2f}, rule agrees)", False
+
+    if not low_confidence and rule_suggestion != current_template:
+        # confidence OK 但规则不同意 → 记录告警，保持原模板（保守策略）
+        _log_template_decision(task, current_template, rule_suggestion,
+                               "rule_disagree", confidence)
+        return current_template, (f"kept original (confidence={confidence:.2f}), "
+                                  f"but rule suggests '{rule_suggestion}' — logged for audit"), False
+
+    if low_confidence and rule_suggestion != current_template:
+        # 低 confidence + 规则不同意 → 采纳规则建议
+        _log_template_decision(task, current_template, rule_suggestion,
+                               "corrected", confidence)
+        return rule_suggestion, (f"corrected: {current_template} → {rule_suggestion} "
+                                 f"(low confidence={confidence:.2f}, rule override)"), True
+
+    if low_confidence and rule_suggestion == current_template:
+        # 低 confidence 但规则同意 → 通过，但记录
+        _log_template_decision(task, current_template, rule_suggestion,
+                               "low_confidence_confirmed", confidence)
+        return current_template, f"confirmed with low confidence={confidence:.2f} (rule agrees)", False
+
+    # Fallthrough (should not reach here)
+    return current_template, "fallthrough", False
+
+
+def _rule_based_template_check(combined_text: str, current_template: str) -> str:
+    """独立规则引擎：基于硬编码规则判断模板类型。
+
+    这套规则独立于 brain_manager.match_template()，作为交叉验证。
+    设计原则：宁可保守（返回 standard-dev），不可激进降级（不轻易返回 quick）。
+    """
+    # 强信号规则（高置信度，直接判定）
+    STRONG_SIGNALS = {
+        "quick": [
+            # 必须同时满足：短文本 + 查询类动词 + 无开发信号
+            lambda t: (len(t) < 50
+                       and any(k in t for k in ["查", "看看", "搜索", "天气", "日程"])
+                       and not any(k in t for k in ["开发", "实现", "修复", "bug", "重构"])),
+        ],
+        "cron-auto": [
+            lambda t: any(k in t for k in ["cron", "定时任务", "定期执行", "每天自动", "每周自动"]),
+        ],
+        "batch-dev": [
+            lambda t: any(k in t for k in ["批量开发", "多个需求", "并行开发", "统筹开发"]),
+        ],
+    }
+
+    for template, rules in STRONG_SIGNALS.items():
+        if any(rule(combined_text) for rule in rules):
+            return template
+
+    # 弱信号规则（需要多个信号叠加）
+    dev_signals = sum(1 for k in ["开发", "实现", "修复", "fix", "bug", "feature", "功能",
+                                   "重构", "refactor", "优化", "添加", "新增", "编写代码"]
+                      if k in combined_text)
+
+    if dev_signals >= 1:
+        return "standard-dev"
+
+    # 无强信号 → 保守返回 standard-dev（宁可过度流程，不可跳过流程）
+    return "standard-dev"
+
+
+def _log_template_decision(task: dict, original: str, suggested: str,
+                           action: str, confidence: float):
+    """记录模板确认决策到 decisions.jsonl（供 Layer 2 审计探针使用）。"""
+    decision = {
+        "timestamp": bm.now_iso(),
+        "type": "template_confirmation",
+        "task_id": task.get("id", ""),
+        "original_template": original,
+        "suggested_template": suggested,
+        "action": action,  # confirmed | rule_disagree | corrected | low_confidence_confirmed
+        "confidence": confidence,
+    }
+    try:
+        bm.append_decision(decision)
+    except Exception:
+        pass  # 日志写入失败不阻塞调度
 
 
 def check_design_gate(task: dict) -> tuple[bool, str]:
@@ -980,6 +1123,65 @@ def _send_feishu_notify(text: str, task_id: str = "") -> bool:
         return False
 
 
+def validate_notification(task: dict, new_state: str, notification_text: str) -> tuple[bool, list[str]]:
+    """Layer 1: 验证通知内容与 task 实际状态一致。
+
+    独立于通知生成逻辑，直接从 task 数据交叉验证通知文本。
+
+    Checks:
+      1. 通知文本包含与 new_state 匹配的关键词
+      2. 通知文本包含 task_id（full 或 short 形式）
+      3. 通知文本包含任务标题（至少部分匹配）
+      4. review 通知必须包含操作指引（Go/NoGo）
+
+    Args:
+        task: Task dict
+        new_state: The target state (review, blocked, done)
+        notification_text: Generated notification text to validate
+
+    Returns:
+        (valid, issues) — valid=True if all checks pass, issues=list of problem descriptions
+    """
+    if not NOTIFICATION_VALIDATE_ENABLED or not CROSS_CHECK_ENABLED:
+        return True, []
+
+    issues = []
+    task_id = task.get("id", "")
+    title = task.get("title", "")
+    text_lower = notification_text.lower()
+
+    # Check 1: State keyword consistency
+    state_keywords = {
+        "review": ["review", "等待", "确认", "📋"],
+        "done":   ["完成", "done", "✅"],
+        "blocked": ["blocked", "阻塞", "🚨"],
+    }
+    expected = state_keywords.get(new_state, [])
+    if expected and not any(kw in text_lower for kw in expected):
+        issues.append(f"通知内容缺少状态关键词: expected one of {expected} for state '{new_state}'")
+
+    # Check 2: Task ID presence (full or short form)
+    if task_id:
+        parts = task_id.split("-")
+        short_id = f"{parts[0]}-{parts[-1]}" if len(parts) == 3 else task_id
+        if task_id not in notification_text and short_id not in notification_text:
+            issues.append(f"通知内容缺少 task_id: {task_id} 或 {short_id}")
+
+    # Check 3: Title presence (at least first 10 chars if title is long)
+    if title:
+        title_check = title[:10] if len(title) > 10 else title
+        if title_check not in notification_text:
+            issues.append(f"通知内容缺少任务标题: '{title_check}...'")
+
+    # Check 4: Review notifications must have action guidance
+    if new_state == "review":
+        if "go" not in text_lower and "nogo" not in text_lower:
+            issues.append("review 通知缺少 Go/NoGo 操作指引")
+
+    valid = len(issues) == 0
+    return valid, issues
+
+
 def notify_task_state_change(task: dict, new_state: str, reason: str = "") -> bool:
     """Send feishu notification when a task enters review/blocked/done state.
 
@@ -1033,6 +1235,19 @@ def notify_task_state_change(task: dict, new_state: str, reason: str = "") -> bo
 
     else:
         return False
+
+    # ── Layer 1: 发送前通知内容校验 (T-010) ──
+    valid, validation_issues = validate_notification(task, new_state, text)
+    if not valid:
+        print(f"[scheduler] notification validation issues for {task_id}: {validation_issues}", flush=True)
+        bm.append_decision({
+            "type": "notification_validation_failed",
+            "task_id": task_id,
+            "timestamp": bm.now_iso(),
+            "state": new_state,
+            "issues": validation_issues,
+        })
+        # 不阻塞发送 — 记录告警但仍发送（避免用户完全收不到通知）
 
     return _send_feishu_notify(text, task_id)
 
@@ -1781,6 +1996,25 @@ def run_scheduler(
         # 4. Cap check (both per-run and global)
         if len(dispatched) >= effective_cap:
             skipped_cap.append(task)
+            continue
+
+        # ★ 4.4 Template confirmation (T-006)
+        confirmed_tpl, confirm_reason, tpl_changed = confirm_template_assignment(task)
+        if tpl_changed:
+            # Update task template in memory (for subsequent role/gate checks)
+            if "workgroup" in task:
+                task["workgroup"]["template"] = confirmed_tpl
+            else:
+                task["template"] = confirmed_tpl
+            # Persist template change
+            if not dry_run:
+                try:
+                    bm.save_task(task)
+                except Exception:
+                    pass
+
+        # Template corrected to quick → skip (extremely rare due to conservative rules)
+        if confirmed_tpl == "quick":
             continue
 
         # 4.5 Design gate check (Phase 1)
