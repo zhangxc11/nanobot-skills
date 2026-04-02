@@ -1245,12 +1245,12 @@ def make_decision(report: dict | None, task: dict) -> Decision:
                         reason=f"developer passed but issues contain blocker keywords — dispatching back"
                     )
 
-            # Check template
-            template = task.get("workgroup", {}).get("template", "") or task.get("template", "")
-            if template in ("quick", "cron-auto"):
+            # Check process level — PL0 tasks skip tester
+            pl = determine_process_level(task)
+            if pl == "PL0":
                 return Decision(
                     action="mark_done",
-                    reason=f"developer passed, {template} template needs no tester"
+                    reason=f"developer passed, PL0 task needs no tester"
                 )
             else:
                 # ── Phase 1: doc triplet check before dispatching tester ──
