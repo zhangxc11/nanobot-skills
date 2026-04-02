@@ -1038,7 +1038,7 @@ def make_decision(report: dict | None, task: dict) -> Decision:
 
             if needs_dev_test(task):
                 # Tasks requiring dev env test MUST have dev environment evidence
-                dev_keywords = ["dev", "localhost", "9081", "9082", "dev-workdir", "dev 环境", "实测", "端到端"]
+                dev_keywords = ["dev 环境", "dev env", "dev-workdir", "dev 实测", "localhost:9081", "localhost:9082", "localhost:8081", "localhost:8082", "dev环境", "dev server", "dev 部署", "localhost", "9081", "9082", "实测", "端到端"]
                 if not any(kw in evidence_text for kw in dev_keywords):
                     category_evidence_ok = False
                     missing_reason = (missing_reason + "; " if missing_reason else "") + \
