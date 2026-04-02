@@ -732,26 +732,29 @@ def _count_evidence_retries(task: dict) -> int:
 # ──────────────────────────────────────────
 
 def get_initial_role(task: dict) -> str:
-    """Determine the first Worker role for a task. Conservative strategy.
+    """Determine the first Worker role for a task based on process level.
 
-    - quick/cron-auto: developer (no architect needed)
-    - batch-dev: architect (needs design/planning)
-    - explicit architect flag: architect
-    - standard-dev / long-task / others: developer (static rules suffice)
+    PL0 (quick/cron-auto): developer — no architect needed
+    PL1 (doc/research):    developer — no architect needed
+    PL2 (standard dev):    architect — needs rule verdict + acceptance plan
+    PL3 (high risk):       architect — needs full design + acceptance plan
+
+    Explicit architect flag still forces architect regardless of PL.
     """
-    template = task.get("template",
-                task.get("workgroup", {}).get("template", "standard-dev"))
-
-    if template in ("quick", "cron-auto"):
-        return "developer"
-
-    if template == "batch-dev":
-        return "architect"
-
+    # Explicit override
     if task.get("architect") or task.get("needs_design"):
         return "architect"
 
-    return "developer"
+    pl = determine_process_level(task)
+
+    if pl == "PL0":
+        return "developer"
+    elif pl == "PL1":
+        return "developer"
+    elif pl in ("PL2", "PL3"):
+        return "architect"
+
+    return "developer"  # fallback
 
 
 # ──────────────────────────────────────────
