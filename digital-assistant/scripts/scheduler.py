@@ -1812,6 +1812,28 @@ def generate_worker_prompt_v2(task: dict, role: str = "developer", prior_context
     elif role == "tester":
         lines += [_generate_tester_guidance(task), ""]
 
+        # ── Inject acceptance_plan if available ──
+        acceptance_plan = task.get("acceptance_plan")
+        if acceptance_plan and isinstance(acceptance_plan, list) and len(acceptance_plan) > 0:
+            lines += [
+                "### 预定义验收方案（MUST 按此执行）",
+                "",
+                "以下是 Architect 产出的验收方案，你必须逐项执行并在 test_evidence 中对应每一步：",
+                "",
+            ]
+            for step in acceptance_plan:
+                sid = step.get("step_id", "?")
+                desc_text = step.get("description", "")
+                cat = step.get("category", "")
+                expected = step.get("expected_result", "")
+                lines.append(f"- **{sid}** [{cat}]: {desc_text} → 预期: {expected}")
+            lines += [
+                "",
+                "⚠️ test_evidence 中的每条记录必须包含 step_id 字段，对应上述步骤。",
+                "⚠️ 未覆盖的步骤会被自动检测并打回（覆盖率需 ≥80%）。",
+                "",
+            ]
+
     # Report template
     lines += [
         "### Report Submission",
