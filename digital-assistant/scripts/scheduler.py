@@ -1155,6 +1155,35 @@ def make_decision(report: dict | None, task: dict) -> Decision:
                     reason=f"tester passed but evidence insufficient for category {task_category}: {missing_reason}"
                 )
 
+            # ── acceptance_plan 覆盖率检查（代码 gate）──
+            # 兼容已有任务：没有 acceptance_plan 的任务跳过此检查
+            acceptance_plan = task.get("acceptance_plan")
+            if acceptance_plan and isinstance(acceptance_plan, list) and len(acceptance_plan) > 0:
+                plan_step_ids = {s.get("step_id") for s in acceptance_plan if isinstance(s, dict) and s.get("step_id")}
+                evidence_for_coverage = report.get("test_evidence") or []
+                covered_ids = {
+                    e.get("step_id") for e in evidence_for_coverage
+                    if isinstance(e, dict) and e.get("step_id")
+                }
+
+                uncovered = plan_step_ids - covered_ids
+                coverage = len(covered_ids & plan_step_ids) / max(len(plan_step_ids), 1)
+
+                if coverage < 0.8:  # 至少 80% 覆盖率
+                    return Decision(
+                        action="dispatch_role",
+                        params={
+                            "role": "tester",
+                            "context": (
+                                f"⚠️ 验收方案覆盖率不足 ({coverage:.0%})。\n"
+                                f"未覆盖步骤: {', '.join(sorted(uncovered))}\n\n"
+                                f"请按验收方案逐项执行并在 test_evidence 中标注 step_id。\n"
+                                f"每条 evidence 必须包含 step_id 字段对应验收方案中的步骤。"
+                            ),
+                        },
+                        reason=f"tester evidence coverage {coverage:.0%} < 80%, uncovered: {uncovered}"
+                    )
+
             # Check review level
             review_level = bm.determine_review_level(task)
             if review_level in ("L0", "L1"):
