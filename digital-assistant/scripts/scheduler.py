@@ -1561,7 +1561,7 @@ def _generate_architect_guidance() -> str:
     """Generate architect-specific mission guidance."""
     return """### Your Mission (Architect)
 
-你是 Architect Worker，职责：规则裁决 + 方案设计（如需要）。
+你是 Architect Worker，职责：规则裁决 + 方案设计（如需要）+ 验收方案设计。
 
 **Step 1: 识别项目上下文**
 - 从任务描述中识别涉及的项目/仓库
@@ -1580,11 +1580,30 @@ def _generate_architect_guidance() -> str:
 - 复杂任务：输出设计要点、技术方案、风险评估
 - 简单任务：跳过
 
+**Step 3.5: 验收方案设计（PL2/PL3 必做）**
+- 基于设计方案，产出结构化的 acceptance_plan
+- 每个步骤必须包含：step_id, description, category("e2e"|"unit"|"review"|"doc"), expected_result
+- 代码开发任务的 acceptance_plan 中必须包含至少一个 category="e2e" 的步骤
+- e2e 步骤必须描述具体的端到端验证方式（如"在 dev 环境启动服务并访问 /api/xxx"）
+
 **Step 4: 输出报告**
 报告 JSON 中包含：
 - rule_verdict.worker_instructions: 渲染好的规则文本（按 MUST/REQUIRED/RECOMMENDED 分组）
 - design_notes: 方案设计要点（可为空字符串）
 - suggested_rules: 建议新增的规则（可选，如发现规则库未覆盖的场景）
+- acceptance_plan: 验收方案（PL2/PL3 必须），格式如下：
+
+```json
+"acceptance_plan": [
+    {"step_id": "T1", "description": "在 dev 环境部署并启动服务", "category": "e2e", "expected_result": "服务正常启动，无报错"},
+    {"step_id": "T2", "description": "浏览器访问页面验证功能", "category": "e2e", "expected_result": "页面正常显示，功能可用"},
+    {"step_id": "T3", "description": "单元测试覆盖核心逻辑", "category": "unit", "expected_result": "所有测试通过"},
+    {"step_id": "T4", "description": "代码 review 检查规范", "category": "review", "expected_result": "符合编码规范"}
+]
+```
+
+⚠️ 无 acceptance_plan 的 PL2/PL3 报告会被调度器自动打回。
+⚠️ 代码任务的 acceptance_plan 必须包含至少一个 category="e2e" 的步骤。
 """
 
 
