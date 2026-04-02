@@ -735,8 +735,12 @@ dev-workflow 合规审计（2026-04-01）发现合规率仅 19.4%。根因分析
 | `DESIGN_GATE_ENABLED` | `DESIGN_GATE_ENABLED` | `"1"` (开启) | `check_design_gate()` |
 | `DOC_TRIPLET_CHECK_ENABLED` | `DOC_TRIPLET_CHECK_ENABLED` | `"1"` (开启) | `check_doc_triplet()` |
 | `TEST_EVIDENCE_ENABLED` | `TEST_EVIDENCE_ENABLED` | `"1"` (开启) | tester pass 时的 test_evidence 校验 |
+| `CROSS_CHECK_ENABLED` | `CROSS_CHECK_ENABLED` | `"1"` (开启) | 全局 cross-check 总开关（关闭则跳过所有 cross-check 校验） |
+| `NOTIFICATION_VALIDATE_ENABLED` | `NOTIFICATION_VALIDATE_ENABLED` | `"1"` (开启) | `validate_notification()` 通知发送前状态一致性校验 |
+| `IRREVERSIBLE_CONFIRM_ENABLED` | `IRREVERSIBLE_CONFIRM_ENABLED` | `"1"` (开启) | 飞书回复 cancel/reject 操作二次确认规则注入 |
 
 **关闭方式**: `export DESIGN_GATE_ENABLED=0` 或 `export DOC_TRIPLET_CHECK_ENABLED=0` 或 `export TEST_EVIDENCE_ENABLED=0`
+Cross-check 相关: `export CROSS_CHECK_ENABLED=0`（总开关）或单独关闭 `NOTIFICATION_VALIDATE_ENABLED=0` / `IRREVERSIBLE_CONFIRM_ENABLED=0`
 
 **设计决策**: 使用环境变量而非配置文件，因为：
 - 无需修改代码或配置文件即可回滚
@@ -775,6 +779,53 @@ dev-workflow 合规审计（2026-04-01）发现合规率仅 19.4%。根因分析
 **Tester Guidance**: `_generate_tester_guidance()` 已追加 test_evidence 格式说明
 
 **Feature Flag**: `TEST_EVIDENCE_ENABLED`（默认开启，设 `"0"` 关闭）
+
+### 8. Cross Check 整改 Phase 1 (T-20260402-002)
+
+**设计文档**: [cross-check-remediation-designer.md](../../data/brain/designs/cross-check-remediation-designer.md)
+
+#### 8.1 Git commit-msg Hook（环节 13 代码上线）
+
+**位置**: `scripts/git_hooks/commit-msg` + `scripts/install_git_hooks.sh`
+
+**目的**: 强制所有 commit message 包含 Task ID，实现代码变更与任务的可追溯性。
+
+**校验规则**:
+- commit message 必须匹配 `T-[0-9]{8}-[0-9]{1,3}` 格式
+- 豁免: Merge/Revert/Initial commit 自动跳过
+- 绕过: `SKIP_TASK_ID_CHECK=1` 环境变量或 `git commit --no-verify`
+
+**安装**: `bash scripts/install_git_hooks.sh`（默认安装到 nanobot + web-chat 两仓库）
+
+#### 8.2 飞书回复不可逆操作二次确认（环节 11 飞书回复路由）
+
+**位置**: `trigger_scheduler.py` L65-87, L340, L422
+
+**目的**: cancel/reject 等不可逆操作必须经用户二次确认后才执行，防止误操作。
+
+**流程**:
+1. 用户发送 "T-001 取消"
+2. 调度器回复确认提示: "⚠️ 确认取消 [T-001]？此操作不可逆。回复'确认取消 001'执行"
+3. 用户回复 "确认取消 001" → 调度器执行
+4. 每次不可逆操作记录到 decisions.jsonl
+
+**Feature Flag**: `IRREVERSIBLE_CONFIRM_ENABLED`
+
+#### 8.3 validate_notification() 通知验证（环节 10 飞书通知内容）
+
+**位置**: `scheduler.py` L1126-1183（函数定义）, L1240-1249（调用点）
+
+**目的**: 通知发送前独立验证通知内容与 task 实际状态一致，防止通知内容与任务状态不匹配。
+
+**校验维度**:
+1. 状态关键词一致性（review/done/blocked 对应关键词）
+2. Task ID 存在性（full 或 short 形式）
+3. 任务标题存在性
+4. Review 通知包含 Go/NoGo 操作指引
+
+**失败处理**: 记录 `notification_validation_failed` 到 decisions.jsonl，不阻塞发送
+
+**Feature Flags**: `CROSS_CHECK_ENABLED`（总开关）+ `NOTIFICATION_VALIDATE_ENABLED`
 
 ### 整改效果与后续规划
 
