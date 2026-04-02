@@ -587,6 +587,9 @@ def check_doc_triplet(task: dict, report: dict | None = None) -> tuple[bool, lis
     for rp in reports:
         try:
             data = json.loads(rp.read_text(encoding="utf-8"))
+            # Check design_ref in report
+            if data.get("design_ref") or data.get("design_doc"):
+                has_design = True
             files = data.get("files_changed", [])
             for f in files:
                 f_upper = f.upper()
@@ -599,6 +602,8 @@ def check_doc_triplet(task: dict, report: dict | None = None) -> tuple[bool, lis
 
     # Also check current report if provided
     if report:
+        if report.get("design_ref") or report.get("design_doc"):
+            has_design = True
         files = report.get("files_changed", [])
         for f in files:
             f_upper = f.upper()
@@ -760,34 +765,56 @@ def parse_worker_report(task_id: str, role: str = None) -> dict | None:
 
     # Sort by mtime, take newest
     report_files.sort(key=lambda p: p.stat().st_mtime, reverse=True)
-    report_file = report_files[0]
 
-    # Parse and validate
-    try:
-        with report_file.open("r", encoding="utf-8") as f:
-            report = json.load(f)
+    # ── P0-3 fix: fail-first priority ──
+    # When multiple reports exist for the same role, a blocked/fail verdict
+    # must NOT be overridden by a later pass. We scan all reports and prefer
+    # the most severe negative verdict over any pass.
+    _VERDICT_PRIORITY = {"blocked": 0, "fail": 1, "partial": 2, "pass": 3}
+    best_report = None
+    best_priority = 999  # lower = more severe
 
-        # Validate required fields
-        for field in REPORT_SCHEMA["required"]:
-            if field not in report:
-                return None
+    for report_file in report_files:
+        try:
+            with report_file.open("r", encoding="utf-8") as f:
+                report = json.load(f)
 
-        # Validate task_id matches
-        if report.get("task_id") != task_id:
-            return None
+            # Validate required fields
+            valid = True
+            for field in REPORT_SCHEMA["required"]:
+                if field not in report:
+                    valid = False
+                    break
+            if not valid:
+                continue
 
-        # Validate role
-        if report.get("role") not in REPORT_SCHEMA["valid_roles"]:
-            return None
+            # Validate task_id matches
+            if report.get("task_id") != task_id:
+                continue
 
-        # Validate verdict
-        if report.get("verdict") not in REPORT_SCHEMA["valid_verdicts"]:
-            return None
+            # Validate role
+            if report.get("role") not in REPORT_SCHEMA["valid_roles"]:
+                continue
 
-        return report
+            # Validate verdict
+            verdict = report.get("verdict")
+            if verdict not in REPORT_SCHEMA["valid_verdicts"]:
+                continue
 
-    except (json.JSONDecodeError, OSError):
-        return None
+            vp = _VERDICT_PRIORITY.get(verdict, 3)
+            if best_report is None:
+                # First valid report (newest by mtime)
+                best_report = report
+                best_priority = vp
+            elif vp < best_priority:
+                # More severe verdict found in an older report — prefer it
+                best_report = report
+                best_priority = vp
+
+        except (json.JSONDecodeError, OSError):
+            continue
+
+    return best_report
 
 
 def get_prior_context(task: dict, max_rounds: int = 2) -> str:
@@ -983,6 +1010,56 @@ def make_decision(report: dict | None, task: dict) -> Decision:
                         reason="tester passed but no test_evidence"
                     )
 
+            # ── P0-2 fix: category-aware evidence gate ──
+            # Beyond format validation, check that evidence matches task category requirements
+            task_category = detect_task_category(task)
+            evidence = report.get("test_evidence") or report.get("test_results") or []
+            evidence_text = " ".join(
+                json.dumps(e, ensure_ascii=False) if isinstance(e, dict) else str(e)
+                for e in evidence
+            ).lower() if evidence else ""
+
+            category_evidence_ok = True
+            missing_reason = ""
+
+            if task_category == "web_frontend":
+                # Web frontend tasks MUST have screenshot or browser evidence
+                screenshot_keywords = ["screenshot", "截图", "browser", "playwright", "浏览器", "页面截图", "screen"]
+                if not any(kw in evidence_text for kw in screenshot_keywords):
+                    category_evidence_ok = False
+                    missing_reason = "Web 前端任务必须包含浏览器截图或 Playwright 验证证据"
+
+            if task_category == "feishu_integration":
+                # Feishu tasks MUST have message/card evidence
+                feishu_keywords = ["消息", "message", "card", "卡片", "message_id", "截图", "screenshot"]
+                if not any(kw in evidence_text for kw in feishu_keywords):
+                    category_evidence_ok = False
+                    missing_reason = "飞书集成任务必须包含实际消息发送证据（消息ID/截图）"
+
+            if needs_dev_test(task):
+                # Tasks requiring dev env test MUST have dev environment evidence
+                dev_keywords = ["dev", "localhost", "9081", "9082", "dev-workdir", "dev 环境", "实测", "端到端"]
+                if not any(kw in evidence_text for kw in dev_keywords):
+                    category_evidence_ok = False
+                    missing_reason = (missing_reason + "; " if missing_reason else "") + \
+                        "涉及 nanobot 核心代码的任务必须包含 dev 环境实测证据"
+
+            if not category_evidence_ok:
+                return Decision(
+                    action="dispatch_role",
+                    params={
+                        "role": "tester",
+                        "context": (
+                            f"⚠️ 测试证据不满足任务分类要求（{task_category}）:\n"
+                            f"{missing_reason}\n\n"
+                            f"请补充对应的验收证据后重新提交报告。\n"
+                            f"当前 test_evidence 内容: {json.dumps(evidence, ensure_ascii=False)}\n\n"
+                            f"之前的测试结论: {summary}"
+                        ),
+                    },
+                    reason=f"tester passed but evidence insufficient for category {task_category}: {missing_reason}"
+                )
+
             # Check review level
             review_level = bm.determine_review_level(task)
             if review_level in ("L0", "L1"):
@@ -1018,6 +1095,32 @@ def make_decision(report: dict | None, task: dict) -> Decision:
     # Developer role
     if role == "developer":
         if verdict == "pass":
+            # ── P0-4 fix: check issues for blocker keywords ──
+            # Developer may report pass but mention unimplemented parts in issues
+            dev_issues = report.get("issues", [])
+            if dev_issues:
+                _BLOCKER_KW = ["not implemented", "not yet", "缺失", "未实现", "未完成",
+                               "todo", "没有实现", "无法实现", "not done", "missing",
+                               "stub", "placeholder", "后端没", "backend not"]
+                issue_text = " ".join(
+                    (i.get("description", "") if isinstance(i, dict) else str(i))
+                    for i in dev_issues
+                ).lower()
+                if any(kw in issue_text for kw in _BLOCKER_KW):
+                    return Decision(
+                        action="dispatch_role",
+                        params={
+                            "role": "developer",
+                            "context": (
+                                "⚠️ 你的报告 verdict=pass 但 issues 中包含未完成/未实现的内容:\n"
+                                f"{json.dumps(dev_issues, ensure_ascii=False, indent=2)}\n\n"
+                                "请完成所有必要实现后再提交 pass 报告。如果确实无法实现，"
+                                "请提交 blocked 报告并说明原因。"
+                            ),
+                        },
+                        reason=f"developer passed but issues contain blocker keywords — dispatching back"
+                    )
+
             # Check template
             template = task.get("workgroup", {}).get("template", "") or task.get("template", "")
             if template in ("quick", "cron-auto"):
@@ -1053,9 +1156,14 @@ def make_decision(report: dict | None, task: dict) -> Decision:
                     )
 
                 # Docs verified, dispatch tester
+                # Include developer issues in tester context for review
+                dev_issues = report.get("issues", [])
+                tester_context = f"Developer completed:\n{summary}"
+                if dev_issues:
+                    tester_context += f"\n\n**Developer reported issues (请审查):**\n{json.dumps(dev_issues, ensure_ascii=False, indent=2)}"
                 return Decision(
                     action="dispatch_role",
-                    params={"role": "tester", "context": f"Developer completed:\n{summary}"},
+                    params={"role": "tester", "context": tester_context},
                     reason="developer passed, docs verified, dispatching tester"
                 )
         elif verdict == "fail":
@@ -1433,13 +1541,36 @@ def _generate_tester_guidance(task: dict) -> str:
 
     Includes auditable rule subset: code scope, commit format, docs, test coverage.
     Process rules (env, branch) are validated by Dispatcher, not Tester.
+
+    P0-1 fix: Injects category-specific verification requirements from
+    VERIFICATION_GUIDANCE and DEV_ENV_GUIDANCE (migrated from legacy prompt).
     """
-    return """### Your Mission (Tester)
+    # ── Category-specific verification requirements ──
+    category = detect_task_category(task)
+    verification = VERIFICATION_GUIDANCE.get(category, VERIFICATION_GUIDANCE["backend_script"])
+
+    category_lines = [
+        f"\n**任务分类验收要求（{verification['label']}）— MUST:**",
+    ]
+    for req in verification["requirements"]:
+        category_lines.append(f"- {req}")
+    category_lines.append("")
+    category_lines.append("> ⚠️ 纯 mock 测试不能算验收通过。涉及 Web 前端的任务必须浏览器实测+截图。")
+
+    # ── Dev environment test requirement (conditional) ──
+    dev_env_section = ""
+    if needs_dev_test(task):
+        dev_env_section = f"\n\n{DEV_ENV_GUIDANCE}"
+
+    category_block = "\n".join(category_lines) + dev_env_section
+
+    return f"""### Your Mission (Tester)
 
 1. Review the implementation
 2. Run all tests and verify they pass
 3. Perform manual testing if needed
 4. Check for edge cases and potential issues
+{category_block}
 
 **规则审查（可观测规则子集）：**
 验证 Developer 实现是否遵守以下可观测规则：
@@ -1451,17 +1582,22 @@ def _generate_tester_guidance(task: dict) -> str:
 > 注意：过程性规则（如使用哪个环境、哪个分支）由 Dispatcher 校验，你不需要检查。
 > 如果发现规则违反，在报告 issues 中标注。
 
+**Developer 报告的 issues（如有，请重点审查）：**
+> Developer 的 issues 会通过 prior_context 传递给你，请检查这些 issues 是否已解决。
+> 如果 issues 中存在未解决的阻断问题，应报告 fail 而非 pass。
+
 **测试证据要求（MUST）**:
 报告中必须包含 test_evidence 字段，记录你实际执行的测试：
 ```json
 "test_evidence": [
-    {"type": "command_output", "command": "pytest tests/", "result": "5 passed, 0 failed"},
-    {"type": "manual_test", "description": "验证功能X", "result": "OK"}
+    {{"type": "command_output", "command": "pytest tests/", "result": "5 passed, 0 failed"}},
+    {{"type": "manual_test", "description": "验证功能X", "result": "OK"}}
 ]
 ```
-支持的 type: command_output, manual_test, code_review, integration_test
+支持的 type: command_output, manual_test, code_review, integration_test, screenshot, browser_test
 每个 evidence 必须有 type 和 result 字段。
 ⚠️ 无 test_evidence 的 pass 报告会被打回。
+⚠️ test_evidence 不满足任务分类要求的 pass 报告会被打回。
 """
 
 
