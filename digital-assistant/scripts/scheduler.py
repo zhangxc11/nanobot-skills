@@ -31,7 +31,7 @@ Usage (CLI — mainly for testing/debugging):
     python3 skills/digital-assistant/scripts/scheduler.py dry-run [--parent SESSION_ID]
 """
 
-SCHEDULER_VERSION = '1.1.0'
+SCHEDULER_VERSION = '2.0.0'
 
 import argparse
 import glob
@@ -123,6 +123,14 @@ VERIFICATION_GUIDANCE = {
             "输出格式验证",
         ],
     },
+    "doc_only": {
+        "label": "📄 纯文档/调研/配置",
+        "requirements": [
+            "文档内容完整",
+            "格式规范",
+            "与任务描述匹配",
+        ],
+    },
 }
 
 
@@ -138,6 +146,18 @@ def detect_task_category(task: dict) -> str:
         return "api_interface"
     if any(kw in text for kw in ["数据", "data", "etl", "pipeline", "解析", "parse"]):
         return "data_processing"
+
+    # B-1 fix: doc_only 分类 — 与 determine_process_level() 的 doc_signals 对齐
+    doc_signals = ["文档", "document", "调研", "research", "分析", "analysis",
+                   "报告", "report", "配置", "config", "整理", "梳理"]
+    code_signals = ["代码", "code", "实现", "implement", "修复", "fix", "bug",
+                    "开发", "develop", "功能", "feature", "重构", "refactor",
+                    ".py", ".ts", ".js", ".tsx", ".jsx", "scheduler", "前端", "后端", "api"]
+    has_doc = any(kw in text for kw in doc_signals)
+    has_code = any(kw in text for kw in code_signals)
+    if has_doc and not has_code:
+        return "doc_only"
+
     return "backend_script"
 
 
@@ -424,6 +444,52 @@ IRREVERSIBLE_ACTIONS = frozenset({"cancel", "reject"})
 MAX_DOC_RETRY = 2
 # Max times a tester can be sent back for missing test_evidence before escalating
 MAX_EVIDENCE_RETRY = 2
+# Max times architect can be sent back for acceptance_plan before auto-generating fallback
+MAX_ACCEPTANCE_PLAN_RETRY = 2
+# Max times tester can be sent back for coverage before escalating to review
+MAX_COVERAGE_RETRY = 2
+# Max tester↔developer ping-pong round-trips before escalating (m-6 protection)
+MAX_TESTER_DEVELOPER_PINGPONG = 3
+
+# ── State machine feature flag ──
+STATE_MACHINE_ENABLED = os.environ.get("STATE_MACHINE_ENABLED", "1") != "0"
+
+# ── State transition table: (process_level, current_role, verdict) → next_action ──
+# next_action can be:
+#   ("role", "xxx")       — dispatch to next role
+#   ("done",)             — mark task done
+#   ("review",)           — escalate to manual review
+#   ("blocked",)          — mark task blocked
+#   ("review_check",)     — check review_level to decide done vs review
+#
+# Gate checks (plan/e2e/coverage/doc) run BEFORE table lookup.
+# If a gate fails, it returns a Decision directly (retry/escalate).
+
+FLOW_TRANSITIONS = {
+    # PL0: developer → done
+    ("PL0", "developer", "pass"):  ("done",),
+    ("PL0", "developer", "fail"):  ("retry", "developer"),
+
+    # PL1: developer → done (skip tester)
+    ("PL1", "developer", "pass"):  ("done",),
+    ("PL1", "developer", "fail"):  ("retry", "developer"),
+
+    # PL2: architect → developer → tester → done/review
+    ("PL2", "architect", "pass"):  ("role", "developer"),
+    ("PL2", "architect", "fail"):  ("blocked",),
+    ("PL2", "developer", "pass"):  ("role", "tester"),
+    ("PL2", "developer", "fail"):  ("retry", "developer"),
+    ("PL2", "tester", "pass"):     ("review_check",),
+    ("PL2", "tester", "fail"):     ("role", "developer"),
+
+    # PL3: architect → developer → tester → review (mandatory)
+    ("PL3", "architect", "pass"):  ("role", "developer"),
+    ("PL3", "architect", "fail"):  ("blocked",),
+    ("PL3", "developer", "pass"):  ("role", "tester"),
+    ("PL3", "developer", "fail"):  ("retry", "developer"),
+    ("PL3", "tester", "pass"):     ("review",),
+    ("PL3", "tester", "fail"):     ("role", "developer"),
+}
 
 
 # ──────────────────────────────────────────
@@ -709,8 +775,10 @@ def _count_doc_retries(task: dict) -> int:
     history = orch.get("history", [])
     count = 0
     for h in history:
-        reason = h.get("reason", "")
-        if "missing docs" in reason or "文档三件套不完整" in reason:
+        if h.get("role") != "developer":
+            continue
+        ctx = h.get("context", "")
+        if "missing docs" in ctx or "文档三件套不完整" in ctx or "文档不完整" in ctx or "文档三件套" in ctx:
             count += 1
     return count
 
@@ -721,10 +789,96 @@ def _count_evidence_retries(task: dict) -> int:
     history = orch.get("history", [])
     count = 0
     for h in history:
-        reason = h.get("reason", "")
-        if "no test_evidence" in reason or "test_evidence" in reason:
+        if h.get("role") != "tester":
+            continue
+        ctx = h.get("context", "")
+        if "no test_evidence" in ctx or "test_evidence" in ctx or "测试证据" in ctx:
             count += 1
     return count
+
+
+def _count_acceptance_plan_retries(task: dict) -> int:
+    """Count how many times architect has been sent back for acceptance_plan."""
+    orch = task.get("orchestration", {})
+    history = orch.get("history", [])
+    count = 0
+    for h in history:
+        if h.get("role") != "architect":
+            continue
+        ctx = h.get("context", "")
+        if "acceptance_plan" in ctx:
+            count += 1
+    return count
+
+
+def _count_coverage_retries(task: dict) -> int:
+    """Count how many times tester has been sent back for coverage."""
+    orch = task.get("orchestration", {})
+    history = orch.get("history", [])
+    count = 0
+    for h in history:
+        if h.get("role") != "tester":
+            continue
+        ctx = h.get("context", "")
+        if "覆盖率" in ctx or "coverage" in ctx:
+            count += 1
+    return count
+
+
+def _count_tester_developer_pingpong(task: dict) -> int:
+    """Count tester↔developer round-trips (m-6 ping-pong protection).
+
+    A round-trip = tester fail → developer → tester again.
+    We count how many times tester dispatched developer due to fail.
+    """
+    orch = task.get("orchestration", {})
+    history = orch.get("history", [])
+    count = 0
+    for i, h in enumerate(history):
+        if h.get("role") == "developer" and i > 0:
+            prev = history[i - 1]
+            if prev.get("role") == "tester":
+                count += 1
+    return count
+
+
+def _generate_default_acceptance_plan(task: dict, level: str = "standard") -> list:
+    """Auto-generate acceptance_plan for tasks without architect.
+
+    Args:
+        task: Task dict
+        level: "minimal" (PL1) or "standard" (PL2 fallback)
+
+    Returns:
+        list[dict] — each dict has step_id, description, category, expected_result, source, generated_at
+    """
+    category = detect_task_category(task)
+    timestamp = bm.now_iso()
+
+    if level == "minimal":
+        return [
+            {"step_id": "A1", "description": "确认任务产出物存在",
+             "category": "check", "expected_result": "文件/输出已生成",
+             "source": "auto", "generated_at": timestamp},
+            {"step_id": "A2", "description": "检查内容完整性",
+             "category": "check", "expected_result": "内容非空且与任务描述匹配",
+             "source": "auto", "generated_at": timestamp},
+        ]
+
+    # Standard: based on VERIFICATION_GUIDANCE
+    verification = VERIFICATION_GUIDANCE.get(category, VERIFICATION_GUIDANCE["backend_script"])
+    steps = []
+    for i, req in enumerate(verification["requirements"], 1):
+        cat = "e2e" if any(kw in req.lower() for kw in ["浏览器", "browser", "实际", "端到端"]) else "unit"
+        steps.append({
+            "step_id": f"A{i}",
+            "description": req,
+            "category": cat,
+            "expected_result": "验证通过",
+            "source": "auto",
+            "generated_at": timestamp,
+        })
+    return steps
 
 
 # ──────────────────────────────────────────
@@ -899,8 +1053,407 @@ def get_prior_context(task: dict, max_rounds: int = 2) -> str:
     return "\n".join(lines)
 
 
+# ──────────────────────────────────────────
+# State machine: gate checks + transition execution
+# ──────────────────────────────────────────
+
+def _gate_architect_plan(task: dict, report: dict, pl: str):
+    """Gate: check acceptance_plan when architect passes (PL2/PL3 only).
+
+    Returns Decision if gate fails, None if gate passes.
+    """
+    if pl not in ("PL2", "PL3"):
+        return None
+
+    acceptance_plan = report.get("acceptance_plan")
+
+    # Gate 1: plan existence
+    if not acceptance_plan or not isinstance(acceptance_plan, list) or len(acceptance_plan) == 0:
+        retry_count = _count_acceptance_plan_retries(task)
+        if retry_count >= MAX_ACCEPTANCE_PLAN_RETRY:
+            # Exceeded retry limit → auto-generate fallback plan and continue
+            acceptance_plan = _generate_default_acceptance_plan(task, level="standard")
+            task["acceptance_plan"] = acceptance_plan
+            bm.save_task(task)
+            return None  # pass through with fallback plan
+        return Decision(
+            action="dispatch_role",
+            params={"role": "architect", "context": (
+                "⚠️ PL2/PL3 任务必须产出 acceptance_plan（验收方案）。\n\n"
+                "请在报告 JSON 中添加 acceptance_plan 字段，格式：\n"
+                '"acceptance_plan": [\n'
+                '    {"step_id": "T1", "description": "...", "category": "e2e", "expected_result": "..."},\n'
+                '    {"step_id": "T2", "description": "...", "category": "unit", "expected_result": "..."}\n'
+                "]\n\n"
+                "每个步骤必须包含 step_id, description, category, expected_result。\n"
+                "代码任务必须包含至少一个 category='e2e' 的步骤。"
+            )},
+            reason="architect passed but missing acceptance_plan for PL2/PL3 task"
+        )
+
+    # Gate 2: e2e step check (code tasks only, not doc_only)
+    has_e2e = any(
+        isinstance(s, dict) and s.get("category") == "e2e"
+        for s in acceptance_plan
+    )
+    task_category = detect_task_category(task)
+    if task_category != "doc_only" and not has_e2e:
+        retry_count = _count_acceptance_plan_retries(task)
+        if retry_count >= MAX_ACCEPTANCE_PLAN_RETRY:
+            # Exceeded retry limit → log warning, pass through
+            return None
+        return Decision(
+            action="dispatch_role",
+            params={"role": "architect", "context": (
+                "⚠️ 代码任务的 acceptance_plan 必须包含至少一个 category='e2e' 的步骤。\n\n"
+                "e2e 步骤应描述具体的端到端验证方式，例如：\n"
+                '{"step_id": "T1", "description": "在 dev 环境部署并验证功能", '
+                '"category": "e2e", "expected_result": "功能正常工作"}\n\n'
+                "请补充 e2e 步骤后重新提交。"
+            )},
+            reason="architect acceptance_plan missing e2e steps for code task"
+        )
+
+    # All gates passed → persist plan
+    task["acceptance_plan"] = acceptance_plan
+    bm.save_task(task)
+    return None
+
+
+def _gate_developer_docs(task: dict, report: dict, pl: str):
+    """Gate: check doc triplet when developer passes (PL2/PL3 only).
+
+    PL0/PL1 skip this gate entirely.
+    Returns Decision if gate fails, None if gate passes.
+    """
+    if pl in ("PL0", "PL1"):
+        return None
+
+    doc_ok, doc_missing = check_doc_triplet(task, report)
+    if not doc_ok:
+        retry_count = _count_doc_retries(task)
+        if retry_count >= MAX_DOC_RETRY:
+            summary = report.get("summary", "")
+            return Decision(
+                action="promote_to_review",
+                params={"summary": f"⚠️ 文档三件套不完整 (已打回{retry_count}次，升级人工审核): 缺少 {', '.join(doc_missing)}. Developer summary: {summary}"},
+                reason=f"developer passed but missing docs after {retry_count} retries: {doc_missing} — escalating to manual review"
+            )
+        summary = report.get("summary", "")
+        return Decision(
+            action="dispatch_role",
+            params={
+                "role": "developer",
+                "context": (
+                    f"⚠️ 文档三件套不完整，缺少: {', '.join(doc_missing)}\n\n"
+                    f"请补全以下文档后重新提交报告:\n"
+                    f"1. DEVLOG.md — 记录开发过程、Phase、checkbox 任务清单\n"
+                    f"2. ARCHITECTURE.md — 方案文档（如已有 design_ref 可跳过）\n\n"
+                    f"之前的工作成果: {summary}"
+                ),
+            },
+            reason=f"developer passed but missing docs: {doc_missing} — dispatching back to complete docs"
+        )
+    return None
+
+
+def _gate_tester_coverage(task: dict, report: dict, pl: str):
+    """Gate: check acceptance_plan coverage when tester passes.
+
+    Backward-compatible: tasks without acceptance_plan skip this gate.
+    Returns Decision if gate fails, None if gate passes.
+    """
+    acceptance_plan = task.get("acceptance_plan")
+    if not acceptance_plan or not isinstance(acceptance_plan, list) or len(acceptance_plan) == 0:
+        return None  # no plan → skip coverage check (backward compat)
+
+    # Calculate coverage
+    evidence = report.get("test_evidence") or []
+    covered_ids = {e.get("step_id") for e in evidence if isinstance(e, dict) and e.get("step_id")}
+    plan_ids = {s.get("step_id") for s in acceptance_plan if isinstance(s, dict) and s.get("step_id")}
+    coverage = len(covered_ids.intersection(plan_ids)) / len(plan_ids) if plan_ids else 1.0
+    uncovered = plan_ids - covered_ids
+
+    # Dynamic threshold by PL
+    coverage_threshold = 1.0 if pl == "PL3" else 0.8
+
+    if coverage < coverage_threshold:
+        retry_count = _count_coverage_retries(task)
+        if retry_count >= MAX_COVERAGE_RETRY:
+            return Decision(
+                action="promote_to_review",
+                params={"summary": f"⚠️ tester 覆盖率 {coverage:.0%} 不足，已打回{retry_count}次。未覆盖: {uncovered}"},
+                reason=f"tester coverage {coverage:.0%} after {retry_count} retries — escalating"
+            )
+        return Decision(
+            action="dispatch_role",
+            params={
+                "role": "tester",
+                "context": (
+                    f"⚠️ 验收方案覆盖率不足 ({coverage:.0%})。\n"
+                    f"未覆盖步骤: {', '.join(sorted(uncovered))}\n\n"
+                    f"请按验收方案逐项执行并在 test_evidence 中标注 step_id。\n"
+                    f"每条 evidence 必须包含 step_id 字段对应验收方案中的步骤。"
+                ),
+            },
+            reason=f"tester evidence coverage {coverage:.0%} < {coverage_threshold:.0%}, uncovered: {uncovered}"
+        )
+
+    return None  # coverage OK
+
+
+def _run_gate_checks(task: dict, report: dict, role: str, verdict: str, pl: str):
+    """Run role-specific gate checks before state transition.
+
+    Returns None if all gates pass, or a Decision if a gate fails.
+    """
+    if role == "architect" and verdict == "pass":
+        return _gate_architect_plan(task, report, pl)
+
+    if role == "developer" and verdict == "pass":
+        # Check blocker keywords in issues first (P0-4 fix)
+        dev_issues = report.get("issues", [])
+        if dev_issues:
+            _BLOCKER_KW = ["not implemented", "not yet", "缺失", "未实现", "未完成",
+                           "todo", "没有实现", "无法实现", "not done", "missing",
+                           "stub", "placeholder", "后端没", "backend not"]
+            issue_text = " ".join(
+                (i.get("description", "") if isinstance(i, dict) else str(i))
+                for i in dev_issues
+            ).lower()
+            if any(kw in issue_text for kw in _BLOCKER_KW):
+                return Decision(
+                    action="dispatch_role",
+                    params={
+                        "role": "developer",
+                        "context": (
+                            "⚠️ 你的报告 verdict=pass 但 issues 中包含未完成/未实现的内容:\n"
+                            f"{json.dumps(dev_issues, ensure_ascii=False, indent=2)}\n\n"
+                            "请完成所有必要实现后再提交 pass 报告。如果确实无法实现，"
+                            "请提交 blocked 报告并说明原因。"
+                        ),
+                    },
+                    reason="developer passed but issues contain blocker keywords — dispatching back"
+                )
+        # Doc triplet gate
+        return _gate_developer_docs(task, report, pl)
+
+    if role == "tester" and verdict == "pass":
+        # test_evidence format validation
+        if TEST_EVIDENCE_ENABLED:
+            evidence = report.get("test_evidence") or report.get("test_results") or []
+            has_valid_evidence = (
+                isinstance(evidence, list)
+                and len(evidence) > 0
+                and all(
+                    isinstance(e, dict) and e.get("type") and e.get("result")
+                    for e in evidence
+                )
+            )
+            if not has_valid_evidence:
+                retry_count = _count_evidence_retries(task)
+                if retry_count >= MAX_EVIDENCE_RETRY:
+                    summary = report.get("summary", "")
+                    return Decision(
+                        action="promote_to_review",
+                        params={"summary": f"⚠️ tester passed 但多次未提供 test_evidence (已打回{retry_count}次). {summary}"},
+                        reason=f"tester passed without test_evidence after {retry_count} retries — escalating"
+                    )
+                summary = report.get("summary", "")
+                return Decision(
+                    action="dispatch_role",
+                    params={
+                        "role": "tester",
+                        "context": (
+                            "⚠️ 测试报告缺少 test_evidence 字段。请补充测试执行证据。\n\n"
+                            "报告中必须包含 test_evidence 字段，格式如下：\n"
+                            '"test_evidence": [\n'
+                            '    {"type": "command_output", "command": "pytest tests/", "result": "5 passed"},\n'
+                            '    {"type": "manual_test", "description": "验证功能X", "result": "OK"}\n'
+                            "]\n\n"
+                            "⚠️ 无 test_evidence 的 pass 报告会被打回。\n\n"
+                            f"之前的测试结论: {summary}"
+                        ),
+                    },
+                    reason="tester passed but no test_evidence"
+                )
+
+        # Category-aware evidence gate (P0-2 fix)
+        task_category = detect_task_category(task)
+        evidence = report.get("test_evidence") or report.get("test_results") or []
+        evidence_text = " ".join(
+            json.dumps(e, ensure_ascii=False) if isinstance(e, dict) else str(e)
+            for e in evidence
+        ).lower() if evidence else ""
+
+        category_evidence_ok = True
+        missing_reason = ""
+
+        if task_category == "web_frontend":
+            screenshot_keywords = ["screenshot", "截图", "browser", "playwright", "浏览器", "页面截图", "screen"]
+            if not any(kw in evidence_text for kw in screenshot_keywords):
+                category_evidence_ok = False
+                missing_reason = "Web 前端任务必须包含浏览器截图或 Playwright 验证证据"
+
+        if task_category == "feishu_integration":
+            feishu_keywords = ["消息", "message", "card", "卡片", "message_id", "截图", "screenshot"]
+            if not any(kw in evidence_text for kw in feishu_keywords):
+                category_evidence_ok = False
+                missing_reason = "飞书集成任务必须包含实际消息发送证据（消息ID/截图）"
+
+        if needs_dev_test(task):
+            dev_keywords = ["dev 环境", "dev env", "dev-workdir", "dev 实测", "localhost:9081", "localhost:9082", "localhost:8081", "localhost:8082", "dev环境", "dev server", "dev 部署", "localhost", "9081", "9082", "实测", "端到端"]
+            if not any(kw in evidence_text for kw in dev_keywords):
+                category_evidence_ok = False
+                missing_reason = (missing_reason + "; " if missing_reason else "") + \
+                    "涉及 nanobot 核心代码的任务必须包含 dev 环境实测证据"
+
+        if not category_evidence_ok:
+            summary = report.get("summary", "")
+            return Decision(
+                action="dispatch_role",
+                params={
+                    "role": "tester",
+                    "context": (
+                        f"⚠️ 测试证据不满足任务分类要求（{task_category}）:\n"
+                        f"{missing_reason}\n\n"
+                        f"请补充对应的验收证据后重新提交报告。\n"
+                        f"当前 test_evidence 内容: {json.dumps(evidence, ensure_ascii=False)}\n\n"
+                        f"之前的测试结论: {summary}"
+                    ),
+                },
+                reason=f"tester passed but evidence insufficient for category {task_category}: {missing_reason}"
+            )
+
+        # Coverage gate
+        return _gate_tester_coverage(task, report, pl)
+
+    if role == "tester" and verdict == "fail":
+        # m-6: ping-pong protection before dispatching developer
+        pingpong_count = _count_tester_developer_pingpong(task)
+        if pingpong_count >= MAX_TESTER_DEVELOPER_PINGPONG:
+            summary = report.get("summary", "")
+            return Decision(
+                action="promote_to_review",
+                params={"summary": f"⚠️ tester↔developer 已往返 {pingpong_count} 次，升级人工审核。最近问题: {summary}"},
+                reason=f"tester↔developer ping-pong {pingpong_count} times — escalating to review"
+            )
+
+    return None  # no gate for this combination
+
+
+def _execute_transition(task: dict, report: dict, transition: tuple, pl: str) -> Decision:
+    """Execute a state transition action."""
+    action_type = transition[0]
+    summary = report.get("summary", "")
+    role = report.get("role", "")
+    history = task.get("orchestration", {}).get("history", [])
+
+    if action_type == "done":
+        return Decision(action="mark_done", reason=f"{pl} flow complete — {role} passed")
+
+    elif action_type == "role":
+        next_role = transition[1]
+        # Build handoff context
+        if role == "architect" and next_role == "developer":
+            # Architect → Developer: inject rule context
+            rule_verdict = report.get("rule_verdict", {})
+            worker_instructions = rule_verdict.get("worker_instructions", "").strip() if rule_verdict else ""
+            if not worker_instructions:
+                static = rule_loader.collect_rules(task)
+                design = report.get("design_notes", report.get("summary", ""))
+                context = f"{static}\n\n### Architect Notes\n{design}" if design else static
+            else:
+                context_parts = [worker_instructions]
+                design_notes = report.get("design_notes", "")
+                if design_notes:
+                    context_parts.append(f"### Architect 设计要点\n\n{design_notes}")
+                context = "\n\n".join(context_parts)
+            # Store rule_context
+            task["rule_context"] = worker_instructions or rule_loader.collect_rules(task)
+            bm.save_task(task)
+        elif role == "developer" and next_role == "tester":
+            # Developer → Tester: include developer summary + issues
+            dev_issues = report.get("issues", [])
+            context = f"Developer completed:\n{summary}"
+            if dev_issues:
+                context += f"\n\n**Developer reported issues (请审查):**\n{json.dumps(dev_issues, ensure_ascii=False, indent=2)}"
+        elif role == "tester" and next_role == "developer":
+            # Tester → Developer: include failure details
+            context = f"Tester found issues:\n{summary}\n\nIssues: {json.dumps(report.get('issues', []))}"
+        else:
+            context = summary
+
+        return Decision(
+            action="dispatch_role",
+            params={"role": next_role, "context": context},
+            reason=f"{pl} transition: {role} → {next_role}"
+        )
+
+    elif action_type == "retry":
+        retry_role = transition[1]
+        # Check max retry (developer fail retries)
+        recent_devs = [h for h in history if h.get("role") == retry_role]
+        if len(recent_devs) >= MAX_SAME_ROLE_CONSECUTIVE:
+            return Decision(
+                action="mark_blocked",
+                reason=f"{retry_role} failed {len(recent_devs)} times, needs human intervention"
+            )
+        return Decision(
+            action="dispatch_role",
+            params={"role": retry_role, "context": f"Previous attempt failed:\n{summary}"},
+            reason=f"{retry_role} failed, retrying"
+        )
+
+    elif action_type == "review_check":
+        # PL2: check review_level to decide done vs review
+        # Also check doc triplet for auto-approve path
+        review_level = bm.determine_review_level(task)
+        if review_level in ("L0", "L1"):
+            doc_ok, doc_missing = check_doc_triplet(task, report)
+            if not doc_ok:
+                return Decision(
+                    action="promote_to_review",
+                    params={"summary": f"⚠️ tester passed but docs incomplete ({', '.join(doc_missing)}). {summary}"},
+                    reason=f"tester passed but docs missing {doc_missing}, upgrading to manual review"
+                )
+            return Decision(
+                action="mark_done",
+                reason=f"tester passed, docs verified, review level {review_level}"
+            )
+        else:
+            return Decision(
+                action="promote_to_review",
+                params={"summary": summary},
+                reason=f"tester passed, promoting to {review_level} review"
+            )
+
+    elif action_type == "review":
+        return Decision(
+            action="promote_to_review",
+            params={"summary": summary},
+            reason=f"{pl} requires mandatory review"
+        )
+
+    elif action_type == "blocked":
+        return Decision(
+            action="mark_blocked",
+            reason=f"{role} rejected task: {summary}"
+        )
+
+    # Unknown transition type — should not happen
+    return Decision(
+        action="promote_to_review",
+        params={"summary": f"Unknown transition: {transition}"},
+        reason=f"unknown transition type: {action_type}"
+    )
+
+
 def make_decision(report: dict | None, task: dict) -> Decision:
     """Make orchestration decision based on worker report.
+
+    When STATE_MACHINE_ENABLED=True (default), uses FLOW_TRANSITIONS table
+    + gate checks. When False, falls back to the original if-else logic.
 
     Args:
         report: Parsed worker report (or None if missing)
@@ -913,6 +1466,8 @@ def make_decision(report: dict | None, task: dict) -> Decision:
     orch = task.get("orchestration", {})
     iteration = orch.get("iteration", 0)
     history = orch.get("history", [])
+
+    # ── Step 0: Global checks (role-independent) ──
 
     # Cycle control: max iterations
     if iteration >= MAX_ORCHESTRATION_ITERATIONS:
@@ -981,16 +1536,42 @@ def make_decision(report: dict | None, task: dict) -> Decision:
                 reason=f"{role} partial — continuable, dispatching same role to finish"
             )
 
+    # ── State machine path (default) ──
+    if STATE_MACHINE_ENABLED:
+        pl = determine_process_level(task)
+
+        # Step 1: Role-specific gate checks (before table lookup)
+        gate_result = _run_gate_checks(task, report, role, verdict, pl)
+        if gate_result is not None:
+            return gate_result
+
+        # Step 2: Look up state transition table
+        transition = FLOW_TRANSITIONS.get((pl, role, verdict))
+        if transition is None:
+            return Decision(
+                action="promote_to_review",
+                params={"summary": f"未知状态转移: PL={pl}, role={role}, verdict={verdict}"},
+                reason=f"no transition defined for ({pl}, {role}, {verdict})"
+            )
+
+        # Step 3: Execute transition
+        return _execute_transition(task, report, transition, pl)
+
+    # ── Legacy if-else path (STATE_MACHINE_ENABLED=False) ──
+    return _make_decision_legacy(report, task, role, verdict, summary, history)
+
+
+def _make_decision_legacy(report: dict, task: dict, role: str, verdict: str,
+                          summary: str, history: list) -> Decision:
+    """Legacy if-else decision logic (fallback when STATE_MACHINE_ENABLED=False)."""
+
     # Architect role
     if role == "architect":
         if verdict == "pass":
-            # Validate architect report
             arch_warnings = validate_architect_report(report)
             for w in arch_warnings:
-                # Log warnings but don't block — static rules provide L0 fallback
                 pass  # warnings are informational
 
-            # ── PL2/PL3: Check acceptance_plan existence and e2e steps ──
             pl = determine_process_level(task)
             if pl in ("PL2", "PL3"):
                 acceptance_plan = report.get("acceptance_plan")
@@ -1010,7 +1591,6 @@ def make_decision(report: dict | None, task: dict) -> Decision:
                         reason="architect passed but missing acceptance_plan for PL2/PL3 task"
                     )
 
-                # Check for e2e steps (code tasks must have at least one)
                 has_e2e = any(
                     isinstance(s, dict) and s.get("category") == "e2e"
                     for s in acceptance_plan
@@ -1029,7 +1609,6 @@ def make_decision(report: dict | None, task: dict) -> Decision:
                         reason="architect acceptance_plan missing e2e steps for code task"
                     )
 
-                # Save acceptance_plan to task for tester injection
                 task["acceptance_plan"] = acceptance_plan
                 bm.save_task(task)
 
@@ -1037,19 +1616,16 @@ def make_decision(report: dict | None, task: dict) -> Decision:
             worker_instructions = rule_verdict.get("worker_instructions", "").strip() if rule_verdict else ""
 
             if not worker_instructions:
-                # Fallback: use static rules
                 static = rule_loader.collect_rules(task)
                 design = report.get("design_notes", report.get("summary", ""))
                 context = f"{static}\n\n### Architect Notes\n{design}" if design else static
             else:
-                # Normal path: use architect-provided instructions
                 context_parts = [worker_instructions]
                 design_notes = report.get("design_notes", "")
                 if design_notes:
                     context_parts.append(f"### Architect 设计要点\n\n{design_notes}")
                 context = "\n\n".join(context_parts)
 
-            # Store in task.rule_context (R2-009)
             task["rule_context"] = worker_instructions or rule_loader.collect_rules(task)
             bm.save_task(task)
 
@@ -1067,7 +1643,6 @@ def make_decision(report: dict | None, task: dict) -> Decision:
     # Tester role
     if role == "tester":
         if verdict == "pass":
-            # ── test_evidence validation ──
             if TEST_EVIDENCE_ENABLED:
                 evidence = report.get("test_evidence") or report.get("test_results") or []
                 has_valid_evidence = (
@@ -1081,7 +1656,6 @@ def make_decision(report: dict | None, task: dict) -> Decision:
                 if not has_valid_evidence:
                     retry_count = _count_evidence_retries(task)
                     if retry_count >= MAX_EVIDENCE_RETRY:
-                        # Escalate to manual review after max retries
                         return Decision(
                             action="promote_to_review",
                             params={"summary": f"⚠️ tester passed 但多次未提供 test_evidence (已打回{retry_count}次). {summary}"},
@@ -1105,8 +1679,7 @@ def make_decision(report: dict | None, task: dict) -> Decision:
                         reason="tester passed but no test_evidence"
                     )
 
-            # ── P0-2 fix: category-aware evidence gate ──
-            # Beyond format validation, check that evidence matches task category requirements
+            # Category-aware evidence gate (P0-2 fix)
             task_category = detect_task_category(task)
             evidence = report.get("test_evidence") or report.get("test_results") or []
             evidence_text = " ".join(
@@ -1118,21 +1691,18 @@ def make_decision(report: dict | None, task: dict) -> Decision:
             missing_reason = ""
 
             if task_category == "web_frontend":
-                # Web frontend tasks MUST have screenshot or browser evidence
                 screenshot_keywords = ["screenshot", "截图", "browser", "playwright", "浏览器", "页面截图", "screen"]
                 if not any(kw in evidence_text for kw in screenshot_keywords):
                     category_evidence_ok = False
                     missing_reason = "Web 前端任务必须包含浏览器截图或 Playwright 验证证据"
 
             if task_category == "feishu_integration":
-                # Feishu tasks MUST have message/card evidence
                 feishu_keywords = ["消息", "message", "card", "卡片", "message_id", "截图", "screenshot"]
                 if not any(kw in evidence_text for kw in feishu_keywords):
                     category_evidence_ok = False
                     missing_reason = "飞书集成任务必须包含实际消息发送证据（消息ID/截图）"
 
             if needs_dev_test(task):
-                # Tasks requiring dev env test MUST have dev environment evidence
                 dev_keywords = ["dev 环境", "dev env", "dev-workdir", "dev 实测", "localhost:9081", "localhost:9082", "localhost:8081", "localhost:8082", "dev环境", "dev server", "dev 部署", "localhost", "9081", "9082", "实测", "端到端"]
                 if not any(kw in evidence_text for kw in dev_keywords):
                     category_evidence_ok = False
@@ -1155,8 +1725,7 @@ def make_decision(report: dict | None, task: dict) -> Decision:
                     reason=f"tester passed but evidence insufficient for category {task_category}: {missing_reason}"
                 )
 
-            # ── acceptance_plan 覆盖率检查（代码 gate）──
-            # 兼容已有任务：没有 acceptance_plan 的任务跳过此检查
+            # acceptance_plan coverage check
             acceptance_plan = task.get("acceptance_plan")
             if acceptance_plan and isinstance(acceptance_plan, list) and len(acceptance_plan) > 0:
                 plan_step_ids = {s.get("step_id") for s in acceptance_plan if isinstance(s, dict) and s.get("step_id")}
@@ -1169,7 +1738,7 @@ def make_decision(report: dict | None, task: dict) -> Decision:
                 uncovered = plan_step_ids - covered_ids
                 coverage = len(covered_ids & plan_step_ids) / max(len(plan_step_ids), 1)
 
-                if coverage < 0.8:  # 至少 80% 覆盖率
+                if coverage < 0.8:
                     return Decision(
                         action="dispatch_role",
                         params={
@@ -1184,10 +1753,8 @@ def make_decision(report: dict | None, task: dict) -> Decision:
                         reason=f"tester evidence coverage {coverage:.0%} < 80%, uncovered: {uncovered}"
                     )
 
-            # Check review level
             review_level = bm.determine_review_level(task)
             if review_level in ("L0", "L1"):
-                # ── Phase 1: L0/L1 auto-approve must check docs ──
                 doc_ok, doc_missing = check_doc_triplet(task, report)
                 if not doc_ok:
                     return Decision(
@@ -1206,7 +1773,6 @@ def make_decision(report: dict | None, task: dict) -> Decision:
                     reason=f"tester passed, promoting to {review_level} review"
                 )
         elif verdict == "fail":
-            # Dispatch back to developer with fix context
             return Decision(
                 action="dispatch_role",
                 params={
@@ -1219,8 +1785,7 @@ def make_decision(report: dict | None, task: dict) -> Decision:
     # Developer role
     if role == "developer":
         if verdict == "pass":
-            # ── P0-4 fix: check issues for blocker keywords ──
-            # Developer may report pass but mention unimplemented parts in issues
+            # P0-4 fix: check issues for blocker keywords
             dev_issues = report.get("issues", [])
             if dev_issues:
                 _BLOCKER_KW = ["not implemented", "not yet", "缺失", "未实现", "未完成",
@@ -1242,23 +1807,21 @@ def make_decision(report: dict | None, task: dict) -> Decision:
                                 "请提交 blocked 报告并说明原因。"
                             ),
                         },
-                        reason=f"developer passed but issues contain blocker keywords — dispatching back"
+                        reason="developer passed but issues contain blocker keywords — dispatching back"
                     )
 
-            # Check process level — PL0 tasks skip tester
+            # Check process level — PL0/PL1 tasks skip tester
             pl = determine_process_level(task)
-            if pl == "PL0":
+            if pl in ("PL0", "PL1"):
                 return Decision(
                     action="mark_done",
-                    reason=f"developer passed, PL0 task needs no tester"
+                    reason=f"developer passed, {pl} task — no tester needed"
                 )
             else:
-                # ── Phase 1: doc triplet check before dispatching tester ──
                 doc_ok, doc_missing = check_doc_triplet(task, report)
                 if not doc_ok:
                     retry_count = _count_doc_retries(task)
                     if retry_count >= MAX_DOC_RETRY:
-                        # Escalate to manual review after max retries
                         return Decision(
                             action="promote_to_review",
                             params={"summary": f"⚠️ 文档三件套不完整 (已打回{retry_count}次，升级人工审核): 缺少 {', '.join(doc_missing)}. Developer summary: {summary}"},
@@ -1279,8 +1842,6 @@ def make_decision(report: dict | None, task: dict) -> Decision:
                         reason=f"developer passed but missing docs: {doc_missing} — dispatching back to complete docs"
                     )
 
-                # Docs verified, dispatch tester
-                # Include developer issues in tester context for review
                 dev_issues = report.get("issues", [])
                 tester_context = f"Developer completed:\n{summary}"
                 if dev_issues:
@@ -1291,7 +1852,6 @@ def make_decision(report: dict | None, task: dict) -> Decision:
                     reason="developer passed, docs verified, dispatching tester"
                 )
         elif verdict == "fail":
-            # Count consecutive developer failures
             recent_devs = [h for h in history if h.get("role") == "developer"]
             if len(recent_devs) < MAX_SAME_ROLE_CONSECUTIVE:
                 return Decision(
@@ -1310,6 +1870,7 @@ def make_decision(report: dict | None, task: dict) -> Decision:
         action="mark_blocked",
         reason=f"unknown role/verdict combination: {role}/{verdict}"
     )
+
 
 
 def _send_feishu_notify(text: str, task_id: str = "") -> bool:
@@ -1680,13 +2241,82 @@ def _generate_architect_guidance() -> str:
 
 
 def _generate_tester_guidance(task: dict) -> str:
-    """Generate tester-specific mission guidance with observable rule audit.
+    """Generate tester-specific mission guidance — routes to plan-based or free mode.
+
+    If the task has an acceptance_plan, generates plan-execution guidance.
+    Otherwise, generates free-test guidance (original behavior).
+    """
+    acceptance_plan = task.get("acceptance_plan")
+    if acceptance_plan and isinstance(acceptance_plan, list) and len(acceptance_plan) > 0:
+        return _generate_tester_guidance_with_plan(task, acceptance_plan)
+    return _generate_tester_guidance_free(task)
+
+
+def _generate_tester_guidance_with_plan(task: dict, acceptance_plan: list) -> str:
+    """Plan-execution mode: tester follows the acceptance_plan step by step."""
+    category = detect_task_category(task)
+    verification = VERIFICATION_GUIDANCE.get(category, VERIFICATION_GUIDANCE["backend_script"])
+
+    category_lines = [
+        f"\n**任务分类验收要求（{verification['label']}）— MUST:**",
+    ]
+    for req in verification["requirements"]:
+        category_lines.append(f"- {req}")
+    category_lines.append("")
+
+    dev_env_section = ""
+    if needs_dev_test(task):
+        dev_env_section = f"\n\n{DEV_ENV_GUIDANCE}"
+
+    category_block = "\n".join(category_lines) + dev_env_section
+
+    # Build plan steps text
+    plan_lines = []
+    for step in acceptance_plan:
+        sid = step.get("step_id", "?")
+        desc = step.get("description", "")
+        cat = step.get("category", "")
+        expected = step.get("expected_result", "")
+        plan_lines.append(f"- **{sid}** [{cat}]: {desc} → 预期: {expected}")
+    plan_text = "\n".join(plan_lines)
+
+    return f"""### Your Mission (Tester) — 方案执行模式
+
+**⚠️ 本任务有预定义验收方案，你必须按方案逐项执行。**
+
+#### 验收方案步骤
+{plan_text}
+
+#### 执行要求
+1. **逐项执行**: 按 step_id 顺序执行每个验收步骤
+2. **记录证据**: 每条 test_evidence 必须包含 step_id 字段对应上述步骤
+3. **覆盖率**: 至少覆盖 80% 的步骤（PL3 需 100%）
+4. **e2e 步骤**: 必须实际执行，不能只靠 mock
+{category_block}
+
+**规则审查（可观测规则子集）：**
+- **代码变更范围**: 只修改与任务相关的文件
+- **Commit 格式**: 每个 commit 是有意义的独立单元
+- **文档更新**: 必要的文档是否按需更新
+- **测试覆盖**: 验收基于真实执行结果
+
+**测试证据要求（MUST）**:
+```json
+"test_evidence": [
+    {{"type": "command_output", "command": "pytest tests/", "result": "5 passed", "step_id": "T3"}},
+    {{"type": "manual_test", "description": "验证功能X", "result": "OK", "step_id": "T1"}}
+]
+```
+⚠️ 无 test_evidence 的 pass 报告会被打回。
+⚠️ 未覆盖的步骤会被自动检测并打回（覆盖率需 ≥80%）。
+"""
+
+
+def _generate_tester_guidance_free(task: dict) -> str:
+    """Free-test mode: original tester guidance (no acceptance_plan).
 
     Includes auditable rule subset: code scope, commit format, docs, test coverage.
     Process rules (env, branch) are validated by Dispatcher, not Tester.
-
-    P0-1 fix: Injects category-specific verification requirements from
-    VERIFICATION_GUIDANCE and DEV_ENV_GUIDANCE (migrated from legacy prompt).
     """
     # ── Category-specific verification requirements ──
     category = detect_task_category(task)
