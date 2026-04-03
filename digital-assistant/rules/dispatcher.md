@@ -55,3 +55,26 @@ Worker 执行不同类型任务时应按需加载对应规则（开发→dev-wor
 每轮调度开始时，先检查 INBOX 待处理消息（`python3 scripts/inbox_helper.py pending`）。
 LLM 全权决策如何处理每条消息（不硬编码路由）。处理完标记 processed。
 INBOX 异常不阻塞调度主流程（降级安全）。
+
+### DISP-013: follow_up_worker 处理规则
+
+当调度器（scheduler.py）的 `execute_decision` 返回 `action: "follow_up_worker"` 时，Dispatcher 必须按以下流程处理：
+
+1. **使用 `follow_up` 工具（而非 `spawn`）** 向已有 subagent 发送消息
+2. **使用返回结果中的 `session_id`** 定位目标 subagent（该 session_id 来自 `task.orchestration.active_workers[role].session_id`）
+3. **将 `follow_up_message`** 作为消息内容发送给 worker
+4. **Fallback 降级**: 如果 follow_up 失败（session 已过期、session_id 不存在或无效），降级为 `dispatch_role`（new spawn），确保调度不卡住
+
+与 `dispatch_role`（new spawn）的区别：
+- `dispatch_role`: 创建全新 subagent（spawn），worker 无之前执行的上下文
+- `follow_up_worker`: 复用已有 subagent（follow_up），worker 保留之前执行的上下文和状态，效率更高
+
+### DISP-014: handle-completion 时更新 Worker 状态
+
+Dispatcher 在处理 worker 完成回调（handle-completion）时，应更新 worker 的 iteration 消耗：
+
+1. 从 subagent 状态获取实际消耗的 iteration 数
+2. 更新 `task.orchestration.active_workers[role].iterations_used`
+3. 调用 `scheduler.register_worker_session` 或直接更新 task YAML
+
+这确保 `_can_follow_up` 的耗尽判断（`iterations_used < max_iterations`）基于真实数据，避免无限 follow_up。

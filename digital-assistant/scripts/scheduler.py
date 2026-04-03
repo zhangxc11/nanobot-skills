@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+from __future__ import annotations
 """
 scheduler.py - Digital Assistant Task Scheduler
 
@@ -31,7 +32,7 @@ Usage (CLI — mainly for testing/debugging):
     python3 skills/digital-assistant/scripts/scheduler.py dry-run [--parent SESSION_ID]
 """
 
-SCHEDULER_VERSION = '2.0.0'
+SCHEDULER_VERSION = '2.1.0'
 
 import argparse
 import glob
@@ -64,7 +65,15 @@ PRIORITY_ORDER = {"P0": 0, "P1": 1, "P2": 2}
 
 # ── Multi-role orchestration constants ──
 LEGACY_MODE = os.environ.get("LEGACY_MODE", "") == "1"
-MAX_ORCHESTRATION_ITERATIONS = 5      # Total iteration cap for developer↔tester loop
+MAX_ORCHESTRATION_ITERATIONS = 20     # Absolute ceiling — no task may exceed this
+
+# PL-based iteration baselines (A-02)
+_PL_BASE_ITERATIONS = {
+    "PL0": 3,
+    "PL1": 5,
+    "PL2": 10,
+    "PL3": 18,
+}
 MAX_SAME_ROLE_CONSECUTIVE = 2         # Max consecutive partial dispatches of same role
 REPORTS_DIR = WORKSPACE / "data" / "brain" / "reports"
 
@@ -73,9 +82,14 @@ FEISHU_NOTIFY_RECIPIENT = "ou_2fba93da1d059fd2520c2f385743f175"
 REPORT_SCHEMA = {
     "required": ["task_id", "role", "verdict", "summary"],
     "optional": ["issues", "files_changed"],
-    "valid_roles": ["developer", "tester", "architect"],
+    "valid_roles": ["developer", "tester", "architect", "auditor", "architect_review", "retrospective"],
     "valid_verdicts": ["pass", "fail", "blocked", "partial"],
 }
+
+# ── Phase 2: Retrospective & Auditor constants ──
+MAX_RETRO_RETRY = 1  # Max times retrospective can trigger a re-route before force-passing
+BRAIN_DIR = WORKSPACE / "data" / "brain"
+VALID_ROLES = frozenset({"developer", "tester", "architect", "auditor", "architect_review", "retrospective"})
 
 # ──────────────────────────────────────────
 # Verification requirements by task category
@@ -474,21 +488,29 @@ FLOW_TRANSITIONS = {
     ("PL1", "developer", "pass"):  ("done",),
     ("PL1", "developer", "fail"):  ("retry", "developer"),
 
-    # PL2: architect → developer → tester → done/review
-    ("PL2", "architect", "pass"):  ("role", "developer"),
-    ("PL2", "architect", "fail"):  ("blocked",),
-    ("PL2", "developer", "pass"):  ("role", "tester"),
-    ("PL2", "developer", "fail"):  ("retry", "developer"),
-    ("PL2", "tester", "pass"):     ("review_check",),
-    ("PL2", "tester", "fail"):     ("role", "developer"),
+    # PL2: architect → developer → tester → retrospective → done/review
+    ("PL2", "architect", "pass"):        ("role", "developer"),
+    ("PL2", "architect", "fail"):        ("blocked",),
+    ("PL2", "developer", "pass"):        ("role", "tester"),
+    ("PL2", "developer", "fail"):        ("retry", "developer"),
+    ("PL2", "tester", "pass"):           ("role", "retrospective"),      # CHANGED: was review_check
+    ("PL2", "tester", "fail"):           ("role", "developer"),
+    ("PL2", "retrospective", "pass"):    ("review_check",),              # NEW: retrospective pass → review_check
+    ("PL2", "retrospective", "fail"):    ("retro_route",),               # NEW: retrospective found missing steps
 
-    # PL3: architect → developer → tester → review (mandatory)
-    ("PL3", "architect", "pass"):  ("role", "developer"),
-    ("PL3", "architect", "fail"):  ("blocked",),
-    ("PL3", "developer", "pass"):  ("role", "tester"),
-    ("PL3", "developer", "fail"):  ("retry", "developer"),
-    ("PL3", "tester", "pass"):     ("review",),
-    ("PL3", "tester", "fail"):     ("role", "developer"),
+    # PL3: architect → developer → architect_review → tester → auditor → retrospective → review (mandatory)
+    ("PL3", "architect", "pass"):          ("role", "developer"),
+    ("PL3", "architect", "fail"):          ("blocked",),
+    ("PL3", "developer", "pass"):          ("role", "architect_review"),  # CHANGED: was tester
+    ("PL3", "developer", "fail"):          ("retry", "developer"),
+    ("PL3", "architect_review", "pass"):   ("role", "tester"),            # NEW: code review pass → tester
+    ("PL3", "architect_review", "fail"):   ("role", "developer"),         # NEW: code review fail → developer
+    ("PL3", "tester", "pass"):             ("role", "auditor"),           # CHANGED: was review
+    ("PL3", "tester", "fail"):             ("role", "developer"),
+    ("PL3", "auditor", "pass"):            ("role", "retrospective"),     # NEW: auditor pass → retrospective
+    ("PL3", "auditor", "fail"):            ("auditor_route",),            # NEW: auditor fail → route decision
+    ("PL3", "retrospective", "pass"):      ("review",),                   # NEW: retrospective pass → review
+    ("PL3", "retrospective", "fail"):      ("retro_route",),              # NEW: retrospective found missing steps
 }
 
 
@@ -842,6 +864,88 @@ def _count_tester_developer_pingpong(task: dict) -> int:
     return count
 
 
+def _count_retro_retries(task: dict) -> int:
+    """Count how many times retrospective has triggered a re-route (fail verdict)."""
+    orch = task.get("orchestration", {})
+    history = orch.get("history", [])
+    count = 0
+    for h in history:
+        if h.get("role") == "retrospective":
+            ctx = h.get("context", "")
+            if "流程复盘发现缺失环节" in ctx or "retrospective" in ctx:
+                count += 1
+    return count
+
+
+# ──────────────────────────────────────────
+# Phase 2: Dispatcher advice (LLM suggestion layer)
+# ──────────────────────────────────────────
+
+def _evaluate_dispatcher_advice(task: dict, report: dict, role: str,
+                                verdict: str, pl: str,
+                                advice: dict) -> Decision | None:
+    """Evaluate dispatcher's judgment and decide whether to override.
+
+    Rules:
+    - advice.verdict == "fail" → 打回（信任 Dispatcher 的判断）
+    - advice.verdict == "concern" → 记录但不打回（留给后续环节处理）
+    - advice.verdict == "pass" or None → 不干预
+    - PL0/PL1: 不参与
+
+    Args:
+        task: Task dict
+        report: Worker report
+        role: Current worker role
+        verdict: Worker verdict
+        pl: Process level
+        advice: Dispatcher advice dict with keys: verdict, reason, concerns, suggested_target
+
+    Returns:
+        Decision if override needed, None otherwise
+    """
+    if pl in ("PL0", "PL1"):
+        return None
+
+    advice_verdict = advice.get("verdict")
+
+    if advice_verdict == "fail":
+        target = advice.get("suggested_target") or role
+        if target not in VALID_ROLES:
+            target = role  # fallback to current role
+        concerns = advice.get("concerns", [])
+        concern_text = "\n".join(f"- {c}" for c in concerns) if concerns else ""
+        reason_text = advice.get("reason", "")
+        context = f"⚠️ Dispatcher 审查发现问题:\n{reason_text}"
+        if concern_text:
+            context += f"\n\n具体关注点:\n{concern_text}"
+        return Decision(
+            action="dispatch_role",
+            params={"role": target, "context": context},
+            reason=f"dispatcher advice: fail — {reason_text}"
+        )
+
+    if advice_verdict == "concern":
+        _record_concern(task, advice)
+        return None  # concern → 不干预当前决策
+
+    return None  # pass or unrecognized → 不干预
+
+
+def _record_concern(task: dict, advice: dict):
+    """Record dispatcher concern to task orchestration for later reference."""
+    orch = task.setdefault("orchestration", {})
+    concerns = orch.setdefault("concerns", [])
+    concerns.append({
+        "timestamp": bm.now_iso(),
+        "reason": advice.get("reason", ""),
+        "concerns": advice.get("concerns", []),
+    })
+    try:
+        bm.save_task(task)
+    except Exception:
+        pass  # best-effort
+
+
 def _generate_default_acceptance_plan(task: dict, level: str = "standard") -> list:
     """Auto-generate acceptance_plan for tasks without architect.
 
@@ -940,7 +1044,7 @@ def validate_architect_report(report: dict) -> list[str]:
 
 @dataclass
 class Decision:
-    action: str  # "promote_to_review", "dispatch_role", "mark_done", "mark_blocked"
+    action: str  # "promote_to_review", "dispatch_role", "follow_up_worker", "mark_done", "mark_blocked"
     params: dict = field(default_factory=dict)
     reason: str = ""
 
@@ -1054,6 +1158,137 @@ def get_prior_context(task: dict, max_rounds: int = 2) -> str:
 
 
 # ──────────────────────────────────────────
+# A-02: Dynamic iteration limit helpers
+# ──────────────────────────────────────────
+
+def _compute_max_iterations(task: dict) -> int:
+    """Compute dynamic iteration limit for a task.
+
+    Priority:
+    1. Architect's expected_steps (if set) + buffer(5)
+    2. PL-based baseline from _PL_BASE_ITERATIONS
+    3. Fallback to MAX_ORCHESTRATION_ITERATIONS
+
+    The result is always capped at MAX_ORCHESTRATION_ITERATIONS.
+    """
+    orch = task.get("orchestration", {})
+    expected_steps = orch.get("expected_steps")
+    if expected_steps and isinstance(expected_steps, int) and expected_steps > 0:
+        return min(expected_steps + 5, MAX_ORCHESTRATION_ITERATIONS)
+
+    pl = determine_process_level(task)
+    base = _PL_BASE_ITERATIONS.get(pl, 12)
+    return min(base, MAX_ORCHESTRATION_ITERATIONS)
+
+
+def register_worker_session(task_id: str, role: str, session_id: str,
+                            max_iterations: int = None) -> bool:
+    """Register a spawned worker's session ID for future follow_up.
+
+    Called by Dispatcher after successful spawn.
+    """
+    task = bm.load_task(task_id)
+    orch = task.setdefault("orchestration", {})
+    workers = orch.setdefault("active_workers", {})
+    workers[role] = {
+        "session_id": session_id,
+        "iterations_used": 0,
+        "max_iterations": max_iterations or _get_role_iteration_limit(role, task),
+        "spawned_at": bm.now_iso(),
+    }
+    bm.save_task(task)
+    return True
+
+
+def _can_follow_up(task: dict, role: str) -> bool:
+    """Check if a role's active worker can be followed up.
+
+    Returns True if the role has an active worker with remaining iterations.
+    """
+    workers = task.get("orchestration", {}).get("active_workers", {})
+    worker = workers.get(role)
+    if not worker or not worker.get("session_id"):
+        return False
+    return worker.get("iterations_used", 0) < worker.get("max_iterations", 0)
+
+
+def _get_follow_up_session(task: dict, role: str) -> str | None:
+    """Get the session_id for follow_up, or None if unavailable."""
+    workers = task.get("orchestration", {}).get("active_workers", {})
+    worker = workers.get(role)
+    if worker and worker.get("session_id"):
+        return worker["session_id"]
+    return None
+
+
+def _build_iteration_info(task: dict) -> dict:
+    """Build iteration info dict for Dispatcher consumption (A-16).
+
+    Returns current/max/remaining counts plus phase_advances and retries breakdown.
+    """
+    orch = task.get("orchestration", {})
+    detail = orch.get("iteration_detail", {})
+    total = detail.get("total", orch.get("iteration", 0))
+    max_iter = _compute_max_iterations(task)
+    return {
+        "current": total,
+        "max": max_iter,
+        "remaining": max_iter - total,
+        "phase_advances": detail.get("phase_advances", 0),
+        "retries": detail.get("retries", 0),
+    }
+
+
+# A-06: Role iteration budget defaults and helpers
+_DEFAULT_ROLE_ITERATIONS = {
+    "developer": 60,
+    "tester": 30,
+    "architect": 25,
+    "auditor": 20,
+    "architect_review": 20,
+    "retrospective": 15,
+}
+
+
+def _get_role_iteration_limit(role: str, task: dict) -> int:
+    """Get iteration limit for a role, respecting Architect's budget suggestion.
+
+    Priority:
+    1. Architect's role_budgets (from task)
+    2. Default per-role limit
+    Cap: 1.5x default (prevent runaway budgets)
+    """
+    default = _DEFAULT_ROLE_ITERATIONS.get(role, 60)
+    max_cap = int(default * 1.5)
+
+    budgets = task.get("role_budgets", {})
+    if role in budgets:
+        suggested = budgets[role]
+        if isinstance(suggested, int) and suggested > 0:
+            return min(suggested, max_cap)
+
+    return default
+
+
+def _budget_warning_text(iterations_used: int, max_iterations: int) -> str:
+    """Generate budget warning text if usage >= 80%.
+
+    Appended to follow_up_message when worker is running low on iterations.
+    """
+    if max_iterations <= 0:
+        return ""
+    usage_pct = iterations_used / max_iterations
+    if usage_pct >= 0.8:
+        remaining = max_iterations - iterations_used
+        return (
+            f"\n\n⚠️ **预算告警**: 你已使用 {iterations_used}/{max_iterations} iterations "
+            f"({usage_pct:.0%})，剩余 {remaining} 次。\n"
+            f"请优先完成核心任务，非关键项可标注为后续改进。\n"
+        )
+    return ""
+
+
+# ──────────────────────────────────────────
 # State machine: gate checks + transition execution
 # ──────────────────────────────────────────
 
@@ -1116,19 +1351,86 @@ def _gate_architect_plan(task: dict, report: dict, pl: str):
 
     # All gates passed → persist plan
     task["acceptance_plan"] = acceptance_plan
+
+    # Persist Architect's expected_steps and role_budgets (A-02, A-06)
+    expected_steps = report.get("expected_steps")
+    if expected_steps and isinstance(expected_steps, int) and expected_steps > 0:
+        task.setdefault("orchestration", {})["expected_steps"] = expected_steps
+
+    role_budgets = report.get("role_budgets")
+    if role_budgets and isinstance(role_budgets, dict):
+        task["role_budgets"] = role_budgets
+
     bm.save_task(task)
     return None
 
 
-def _gate_developer_docs(task: dict, report: dict, pl: str):
-    """Gate: check doc triplet when developer passes (PL2/PL3 only).
+def _check_devlog_on_filesystem(task: dict, report: dict) -> bool:
+    """Check if DEVLOG exists on filesystem (fallback for files_changed miss).
 
+    Searches common dev-workdir paths for DEVLOG.md.
+    """
+    dev_dir = Path(os.environ.get("DEV_WORKDIR", str(WORKSPACE / "dev-workdir")))
+    if not dev_dir.exists():
+        return False
+    for pattern in ["**/DEVLOG.md", "**/devlog.md"]:
+        if list(dev_dir.glob(pattern)):
+            return True
+    return False
+
+
+def _gate_developer_docs(task: dict, report: dict, pl: str):
+    """Gate: check docs when developer passes (PL2/PL3 only).
+
+    Layer 1: DEVLOG existence check (new, stricter).
+    Layer 2: Original doc triplet check (preserved).
     PL0/PL1 skip this gate entirely.
     Returns Decision if gate fails, None if gate passes.
     """
     if pl in ("PL0", "PL1"):
         return None
 
+    # --- Layer 1: DEVLOG existence ---
+    files_changed = report.get("files_changed", [])
+    has_devlog = any("DEVLOG" in f.upper() or "devlog" in f for f in files_changed)
+
+    if not has_devlog:
+        has_devlog = _check_devlog_on_filesystem(task, report)
+
+    if not has_devlog:
+        retry_count = _count_doc_retries(task)
+        if retry_count >= MAX_DOC_RETRY:
+            return Decision(
+                action="promote_to_review",
+                params={"summary": f"⚠️ Developer 多次未提供 DEVLOG (已打回{retry_count}次)"},
+                reason=f"developer no DEVLOG after {retry_count} retries"
+            )
+        if _can_follow_up(task, "developer"):
+            return Decision(
+                action="follow_up_worker",
+                params={
+                    "role": "developer",
+                    "context": (
+                        "⚠️ 代码实现已完成，但缺少 DEVLOG.md。\n\n"
+                        "请在项目目录中创建/更新 DEVLOG.md，记录：\n"
+                        "1. 本次改动的 Phase 和 checkbox 任务清单\n"
+                        "2. 关键设计决策和 trade-off\n"
+                        "3. 已知问题和后续计划\n\n"
+                        "完成后重新提交报告，确保 files_changed 包含 DEVLOG.md。"
+                    ),
+                },
+                reason="developer passed but missing DEVLOG — follow_up to complete"
+            )
+        return Decision(
+            action="dispatch_role",
+            params={
+                "role": "developer",
+                "context": "⚠️ 缺少 DEVLOG.md，请补全后重新提交。",
+            },
+            reason="developer passed but missing DEVLOG — dispatching back"
+        )
+
+    # --- Layer 2: Original doc triplet check ---
     doc_ok, doc_missing = check_doc_triplet(task, report)
     if not doc_ok:
         retry_count = _count_doc_retries(task)
@@ -1140,6 +1442,12 @@ def _gate_developer_docs(task: dict, report: dict, pl: str):
                 reason=f"developer passed but missing docs after {retry_count} retries: {doc_missing} — escalating to manual review"
             )
         summary = report.get("summary", "")
+        if _can_follow_up(task, "developer"):
+            return Decision(
+                action="follow_up_worker",
+                params={"role": "developer", "context": f"⚠️ 文档不完整: {', '.join(doc_missing)}"},
+                reason=f"developer docs incomplete — follow_up"
+            )
         return Decision(
             action="dispatch_role",
             params={
@@ -1202,6 +1510,49 @@ def _gate_tester_coverage(task: dict, report: dict, pl: str):
     return None  # coverage OK
 
 
+def _validate_state_transition(task: dict, target_state: str) -> tuple:
+    """Validate a state transition at the scheduler (business) level.
+
+    This is on top of brain_manager's VALID_TRANSITIONS (which handles
+    basic state machine validity). This function checks business rules.
+
+    Args:
+        task: Task dict
+        target_state: Target state string (e.g. "done", "review", "executing")
+
+    Returns:
+        (valid, reason) — valid=True means transition is allowed
+    """
+    current = task.get("status", "pending")
+    pl = determine_process_level(task)
+    orch = task.get("orchestration", {})
+    history = orch.get("history", [])
+
+    # Rule 1: PL3 tasks must go through review before done
+    if target_state == "done" and pl == "PL3":
+        has_review = any(h.get("role") in ("auditor", "retrospective") for h in history)
+        if not has_review and current != "review":
+            return False, "PL3 tasks must go through auditor/retrospective before done"
+
+    # Rule 2: PL2+ tasks should have tester in history before done/review
+    if target_state in ("done", "review") and pl in ("PL2", "PL3"):
+        has_tester = any(h.get("role") == "tester" for h in history)
+        if not has_tester:
+            return False, f"{pl} tasks must have tester before {target_state}"
+
+    # Rule 3: Cannot go to executing if already executing (double dispatch guard)
+    if target_state == "executing" and current == "executing":
+        return False, "task already executing — possible double dispatch"
+
+    return True, "ok"
+
+
+def _is_code_task(task: dict) -> bool:
+    """Check if task involves code changes (vs doc-only)."""
+    category = detect_task_category(task)
+    return category != "doc_only"
+
+
 def _run_gate_checks(task: dict, report: dict, role: str, verdict: str, pl: str):
     """Run role-specific gate checks before state transition.
 
@@ -1234,6 +1585,49 @@ def _run_gate_checks(task: dict, report: dict, role: str, verdict: str, pl: str)
                         ),
                     },
                     reason="developer passed but issues contain blocker keywords — dispatching back"
+                )
+        # Smoke test gate (A-12): code tasks must include smoke_test result
+        if _is_code_task(task):
+            smoke_test = report.get("smoke_test")
+            if not smoke_test or not isinstance(smoke_test, dict):
+                if _can_follow_up(task, "developer"):
+                    return Decision(
+                        action="follow_up_worker",
+                        params={
+                            "role": "developer",
+                            "context": (
+                                "⚠️ 报告缺少 smoke_test 字段。\n\n"
+                                "请在完成代码后执行基本冒烟测试并记录结果：\n"
+                                '在报告中添加: "smoke_test": {"command": "python -c \\"import module\\"", "status": "pass", "output": "..."}\n\n'
+                                "至少验证：(1) 代码可 import (2) 主入口可执行无报错"
+                            ),
+                        },
+                        reason="developer passed but no smoke_test"
+                    )
+                return Decision(
+                    action="dispatch_role",
+                    params={"role": "developer", "context": "⚠️ 缺少 smoke_test，请补充。"},
+                    reason="developer passed but no smoke_test — dispatching back"
+                )
+            if smoke_test.get("status") != "pass":
+                if _can_follow_up(task, "developer"):
+                    return Decision(
+                        action="follow_up_worker",
+                        params={
+                            "role": "developer",
+                            "context": (
+                                f"⚠️ 冒烟测试未通过：\n"
+                                f"命令: {smoke_test.get('command', 'N/A')}\n"
+                                f"输出: {smoke_test.get('output', 'N/A')}\n\n"
+                                f"请修复后重新提交。"
+                            ),
+                        },
+                        reason=f"developer smoke_test failed: {smoke_test.get('output', '')[:100]}"
+                    )
+                return Decision(
+                    action="dispatch_role",
+                    params={"role": "developer", "context": "⚠️ 冒烟测试失败，请修复。"},
+                    reason="developer smoke_test failed — dispatching back"
                 )
         # Doc triplet gate
         return _gate_developer_docs(task, report, pl)
@@ -1342,7 +1736,59 @@ def _run_gate_checks(task: dict, report: dict, role: str, verdict: str, pl: str)
     return None  # no gate for this combination
 
 
-def _execute_transition(task: dict, report: dict, transition: tuple, pl: str) -> Decision:
+def _build_handoff_context(from_role: str, to_role: str, report: dict,
+                           task: dict, summary: str) -> str:
+    """Build context string for role handoff transitions.
+
+    Extracted from _execute_transition to keep it concise and testable.
+    """
+    if from_role == "architect" and to_role == "developer":
+        rule_verdict = report.get("rule_verdict", {})
+        worker_instructions = rule_verdict.get("worker_instructions", "").strip() if rule_verdict else ""
+        if not worker_instructions:
+            static = rule_loader.collect_rules(task)
+            design = report.get("design_notes", report.get("summary", ""))
+            context = f"{static}\n\n### Architect Notes\n{design}" if design else static
+        else:
+            context_parts = [worker_instructions]
+            design_notes = report.get("design_notes", "")
+            if design_notes:
+                context_parts.append(f"### Architect 设计要点\n\n{design_notes}")
+            context = "\n\n".join(context_parts)
+        # Store rule_context
+        task["rule_context"] = worker_instructions or rule_loader.collect_rules(task)
+        bm.save_task(task)
+        return context
+    elif from_role == "developer" and to_role == "tester":
+        dev_issues = report.get("issues", [])
+        context = f"Developer completed:\n{summary}"
+        if dev_issues:
+            context += f"\n\n**Developer reported issues (请审查):**\n{json.dumps(dev_issues, ensure_ascii=False, indent=2)}"
+        return context
+    elif from_role == "developer" and to_role == "architect_review":
+        dev_issues = report.get("issues", [])
+        context = f"Developer completed implementation. Please review for design consistency.\n\nDeveloper summary:\n{summary}"
+        if dev_issues:
+            context += f"\n\n**Developer reported issues:**\n{json.dumps(dev_issues, ensure_ascii=False, indent=2)}"
+        return context
+    elif from_role == "architect_review" and to_role == "tester":
+        return f"Architect code review passed:\n{summary}"
+    elif from_role == "architect_review" and to_role == "developer":
+        return f"Architect code review found issues:\n{summary}\n\nIssues: {json.dumps(report.get('issues', []))}"
+    elif from_role == "tester" and to_role == "developer":
+        return f"Tester found issues:\n{summary}\n\nIssues: {json.dumps(report.get('issues', []))}"
+    elif from_role == "tester" and to_role == "auditor":
+        return f"Tester passed. Please audit the full orchestration flow.\n\nTester summary:\n{summary}"
+    elif from_role == "tester" and to_role == "retrospective":
+        return f"Tester passed. Please review the orchestration flow completeness.\n\nTester summary:\n{summary}"
+    elif from_role == "auditor" and to_role == "retrospective":
+        return f"Auditor passed. Please perform final flow retrospective.\n\nAuditor summary:\n{summary}"
+    else:
+        return summary
+
+
+def _execute_transition(task: dict, report: dict, transition: tuple, pl: str,
+                        dispatcher_advice: dict | None = None) -> Decision:
     """Execute a state transition action."""
     action_type = transition[0]
     summary = report.get("summary", "")
@@ -1354,36 +1800,15 @@ def _execute_transition(task: dict, report: dict, transition: tuple, pl: str) ->
 
     elif action_type == "role":
         next_role = transition[1]
-        # Build handoff context
-        if role == "architect" and next_role == "developer":
-            # Architect → Developer: inject rule context
-            rule_verdict = report.get("rule_verdict", {})
-            worker_instructions = rule_verdict.get("worker_instructions", "").strip() if rule_verdict else ""
-            if not worker_instructions:
-                static = rule_loader.collect_rules(task)
-                design = report.get("design_notes", report.get("summary", ""))
-                context = f"{static}\n\n### Architect Notes\n{design}" if design else static
-            else:
-                context_parts = [worker_instructions]
-                design_notes = report.get("design_notes", "")
-                if design_notes:
-                    context_parts.append(f"### Architect 设计要点\n\n{design_notes}")
-                context = "\n\n".join(context_parts)
-            # Store rule_context
-            task["rule_context"] = worker_instructions or rule_loader.collect_rules(task)
-            bm.save_task(task)
-        elif role == "developer" and next_role == "tester":
-            # Developer → Tester: include developer summary + issues
-            dev_issues = report.get("issues", [])
-            context = f"Developer completed:\n{summary}"
-            if dev_issues:
-                context += f"\n\n**Developer reported issues (请审查):**\n{json.dumps(dev_issues, ensure_ascii=False, indent=2)}"
-        elif role == "tester" and next_role == "developer":
-            # Tester → Developer: include failure details
-            context = f"Tester found issues:\n{summary}\n\nIssues: {json.dumps(report.get('issues', []))}"
-        else:
-            context = summary
+        context = _build_handoff_context(role, next_role, report, task, summary)
 
+        # Check if target role has reusable active worker (A-01)
+        if _can_follow_up(task, next_role):
+            return Decision(
+                action="follow_up_worker",
+                params={"role": next_role, "context": context},
+                reason=f"{pl} transition: {role} → {next_role} (follow_up existing worker)"
+            )
         return Decision(
             action="dispatch_role",
             params={"role": next_role, "context": context},
@@ -1399,10 +1824,17 @@ def _execute_transition(task: dict, report: dict, transition: tuple, pl: str) ->
                 action="mark_blocked",
                 reason=f"{retry_role} failed {len(recent_devs)} times, needs human intervention"
             )
+        # Prefer follow_up if active worker exists (A-01)
+        if _can_follow_up(task, retry_role):
+            return Decision(
+                action="follow_up_worker",
+                params={"role": retry_role, "context": f"Previous attempt result:\n{summary}"},
+                reason=f"{retry_role} retry via follow_up (preserving context)"
+            )
         return Decision(
             action="dispatch_role",
             params={"role": retry_role, "context": f"Previous attempt failed:\n{summary}"},
-            reason=f"{retry_role} failed, retrying"
+            reason=f"{retry_role} failed, retrying (new spawn)"
         )
 
     elif action_type == "review_check":
@@ -1441,6 +1873,14 @@ def _execute_transition(task: dict, report: dict, transition: tuple, pl: str) ->
             reason=f"{role} rejected task: {summary}"
         )
 
+    elif action_type == "auditor_route":
+        # Phase 2: Auditor fail → route to appropriate role
+        return _handle_auditor_route(task, report, pl, dispatcher_advice)
+
+    elif action_type == "retro_route":
+        # Phase 2: Retrospective fail → route to missing role
+        return _handle_retro_route(task, report, pl)
+
     # Unknown transition type — should not happen
     return Decision(
         action="promote_to_review",
@@ -1449,7 +1889,153 @@ def _execute_transition(task: dict, report: dict, transition: tuple, pl: str) ->
     )
 
 
-def make_decision(report: dict | None, task: dict) -> Decision:
+# ──────────────────────────────────────────
+# Phase 2: Auditor route + Retrospective route
+# ──────────────────────────────────────────
+
+def _handle_auditor_route(task: dict, report: dict, pl: str,
+                          dispatcher_advice: dict | None = None) -> Decision:
+    """When auditor fails, determine who to send back to.
+
+    Three possible targets based on report analysis:
+    - developer: code issues (bugs, missing implementation)
+    - architect: test gaps → 补测试方案 → 然后 tester 补测执行
+    - tester: test execution gaps (plan exists but not executed properly)
+
+    Uses dispatcher_advice.suggested_target if available,
+    otherwise report.suggested_target, otherwise defaults to developer.
+    """
+    target = "developer"  # safe default
+
+    # Dispatcher 判断优先
+    if dispatcher_advice and dispatcher_advice.get("suggested_target"):
+        target = dispatcher_advice["suggested_target"]
+    # 报告中的 suggested_target 作为备选
+    elif report.get("suggested_target"):
+        target = report["suggested_target"]
+
+    # Validate target
+    if target not in ("developer", "tester", "architect"):
+        target = "developer"
+
+    # Build context from auditor feedback
+    context = _build_auditor_feedback(report, target)
+
+    # If routing to architect, it means test plan gap — add explicit guidance
+    if target == "architect":
+        context += (
+            "\n\n⚠️ Auditor 发现测试方案存在盲区。"
+            "请补充测试方案（acceptance_plan），覆盖 Auditor 指出的 gap。"
+            "\n不需要重新设计整个方案，只需补充缺失的测试步骤。"
+        )
+
+    return Decision(
+        action="dispatch_role",
+        params={"role": target, "context": context},
+        reason=f"auditor failed — routing to {target}"
+    )
+
+
+def _build_auditor_feedback(report: dict, target: str) -> str:
+    """Build context string from auditor report for the target role."""
+    summary = report.get("summary", "")
+    issues = report.get("issues", [])
+
+    lines = [f"⚠️ Auditor 审计发现问题（打回至 {target}）:"]
+    if summary:
+        lines.append(f"\n审计摘要:\n{summary}")
+    if issues:
+        lines.append(f"\n具体问题:")
+        for issue in issues:
+            if isinstance(issue, dict):
+                desc = issue.get("description", str(issue))
+            else:
+                desc = str(issue)
+            lines.append(f"- {desc}")
+
+    return "\n".join(lines)
+
+
+def _handle_retro_route(task: dict, report: dict, pl: str) -> Decision:
+    """When retrospective fails (missing steps found), route back to fill gaps.
+
+    If retrospective has already retried MAX_RETRO_RETRY times, force pass
+    to prevent infinite loops.
+    """
+    # Check retry limit
+    retro_retries = _count_retro_retries(task)
+    if retro_retries >= MAX_RETRO_RETRY:
+        # Exceeded retry limit → record issue and pass through
+        _record_retro_issue(task, report)
+        if pl == "PL3":
+            return Decision(
+                action="promote_to_review",
+                params={"summary": f"⚠️ 流程复盘超过重试限制 ({MAX_RETRO_RETRY})，升级人工 review。"},
+                reason=f"retrospective retry limit reached ({retro_retries}), escalating to review"
+            )
+        else:
+            return Decision(
+                action="mark_done",
+                reason=f"retrospective retry limit reached ({retro_retries}), force passing (PL2)"
+            )
+
+    missing_role = report.get("missing_role")
+    if not missing_role or missing_role not in VALID_ROLES:
+        # Cannot determine missing role → record issue and pass through
+        _record_retro_issue(task, report)
+        if pl == "PL3":
+            return Decision(
+                action="promote_to_review",
+                params={"summary": "⚠️ 流程复盘发现问题但无法确定缺失角色，升级人工 review。"},
+                reason="retrospective fail but unclear target"
+            )
+        else:
+            return Decision(
+                action="mark_done",
+                reason="retrospective fail but unclear target (PL2)"
+            )
+
+    missing_reason = report.get("missing_reason", "未说明原因")
+    return Decision(
+        action="dispatch_role",
+        params={
+            "role": missing_role,
+            "context": f"⚠️ 流程复盘发现缺失环节:\n{missing_reason}\n\n请补完此环节。"
+        },
+        reason=f"retrospective found missing {missing_role} step"
+    )
+
+
+def _record_retro_issue(task: dict, report: dict):
+    """Record process improvement suggestions from retrospective to persistent log."""
+    issues = report.get("issues", [])
+    if not issues:
+        # Even if no structured issues, record the summary as a general issue
+        summary = report.get("summary", "")
+        if summary:
+            issues = [{"description": summary, "source": "retrospective_summary"}]
+        else:
+            return
+
+    log_path = BRAIN_DIR / "reports" / "process-improvements.jsonl"
+    try:
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(log_path, "a", encoding="utf-8") as f:
+            for issue in issues:
+                entry = {
+                    "timestamp": bm.now_iso(),
+                    "task_id": task.get("id", ""),
+                    "process_level": determine_process_level(task),
+                    "issue": issue if isinstance(issue, dict) else {"description": str(issue)},
+                    "source": "retrospective",
+                }
+                f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+    except Exception:
+        pass  # best-effort logging
+
+
+def make_decision(report: dict | None, task: dict,
+                  dispatcher_advice: dict | None = None) -> Decision:
     """Make orchestration decision based on worker report.
 
     When STATE_MACHINE_ENABLED=True (default), uses FLOW_TRANSITIONS table
@@ -1458,6 +2044,13 @@ def make_decision(report: dict | None, task: dict) -> Decision:
     Args:
         report: Parsed worker report (or None if missing)
         task: Task dict
+        dispatcher_advice: Optional dispatcher LLM judgment, e.g.:
+            {
+                "verdict": "pass" | "fail" | "concern",
+                "reason": "报告中 E10 声称端到端但实际只是函数调用",
+                "concerns": ["e2e 测试缺少 session 级证据"],
+                "suggested_target": "tester",  # 建议打回谁
+            }
 
     Returns:
         Decision object with action and params
@@ -1470,10 +2063,11 @@ def make_decision(report: dict | None, task: dict) -> Decision:
     # ── Step 0: Global checks (role-independent) ──
 
     # Cycle control: max iterations
-    if iteration >= MAX_ORCHESTRATION_ITERATIONS:
+    max_iter = _compute_max_iterations(task)
+    if iteration >= max_iter:
         return Decision(
             action="mark_blocked",
-            reason=f"max iterations reached ({MAX_ORCHESTRATION_ITERATIONS})"
+            reason=f"max iterations reached ({iteration}/{max_iter}, PL={determine_process_level(task)})"
         )
 
     # No report found
@@ -1540,10 +2134,19 @@ def make_decision(report: dict | None, task: dict) -> Decision:
     if STATE_MACHINE_ENABLED:
         pl = determine_process_level(task)
 
-        # Step 1: Role-specific gate checks (before table lookup)
+        # Step 1: Role-specific gate checks (before table lookup) — hard gate
         gate_result = _run_gate_checks(task, report, role, verdict, pl)
         if gate_result is not None:
             return gate_result
+
+        # Step 1.5 [Phase 2]: Dispatcher judgment (semantic layer)
+        # Only for PL2/PL3; dispatcher_advice is optional for backward compat
+        if dispatcher_advice and pl in ("PL2", "PL3"):
+            override = _evaluate_dispatcher_advice(
+                task, report, role, verdict, pl, dispatcher_advice
+            )
+            if override is not None:
+                return override
 
         # Step 2: Look up state transition table
         transition = FLOW_TRANSITIONS.get((pl, role, verdict))
@@ -1554,8 +2157,9 @@ def make_decision(report: dict | None, task: dict) -> Decision:
                 reason=f"no transition defined for ({pl}, {role}, {verdict})"
             )
 
-        # Step 3: Execute transition
-        return _execute_transition(task, report, transition, pl)
+        # Step 3: Execute transition (pass dispatcher_advice for route decisions)
+        return _execute_transition(task, report, transition, pl,
+                                   dispatcher_advice=dispatcher_advice)
 
     # ── Legacy if-else path (STATE_MACHINE_ENABLED=False) ──
     return _make_decision_legacy(report, task, role, verdict, summary, history)
@@ -2100,6 +2704,15 @@ def execute_decision(decision: Decision, task: dict) -> dict:
         })
 
         if action == "promote_to_review":
+            # State transition validation (A-20)
+            valid, reason = _validate_state_transition(task, "review")
+            if not valid:
+                bm.append_decision({
+                    "timestamp": bm.now_iso(),
+                    "task_id": task_id,
+                    "action": "state_validation_warning",
+                    "reason": reason,
+                })
             # Create review
             task.setdefault("review", {"pending_count": 0, "items": []})
             review_id = bm.next_review_id()
@@ -2128,15 +2741,24 @@ def execute_decision(decision: Decision, task: dict) -> dict:
             # Notify user: task awaiting review
             notify_task_state_change(task, "review", reason=decision.params.get("summary", ""))
 
-            return {"ok": True, "action": action, "review_id": review_id}
+            return {"ok": True, "action": action, "review_id": review_id, "iteration_info": _build_iteration_info(task)}
 
         elif action == "mark_done":
+            # State transition validation (A-20)
+            valid, reason = _validate_state_transition(task, "done")
+            if not valid:
+                bm.append_decision({
+                    "timestamp": bm.now_iso(),
+                    "task_id": task_id,
+                    "action": "state_validation_warning",
+                    "reason": reason,
+                })
             bm.transition_task(task_id, "done", note=f"orchestrator: {decision.reason}")
 
             # Notify user: task completed
             notify_task_state_change(task, "done")
 
-            return {"ok": True, "action": action}
+            return {"ok": True, "action": action, "iteration_info": _build_iteration_info(task)}
 
         elif action == "mark_blocked":
             bm.transition_task(task_id, "blocked", note=f"orchestrator: {decision.reason}")
@@ -2144,16 +2766,28 @@ def execute_decision(decision: Decision, task: dict) -> dict:
             # Notify user: task blocked, needs decision
             notify_task_state_change(task, "blocked", reason=decision.reason)
 
-            return {"ok": True, "action": action, "reason": decision.reason}
+            return {"ok": True, "action": action, "reason": decision.reason, "iteration_info": _build_iteration_info(task)}
 
         elif action == "dispatch_role":
-            # Update orchestration state
+            # Update orchestration state with iteration_detail (A-04)
             orch = task.get("orchestration", {})
-            orch["iteration"] = orch.get("iteration", 0) + 1
+            detail = orch.setdefault("iteration_detail", {"total": 0, "phase_advances": 0, "retries": 0})
+            detail["total"] += 1
+
+            # Determine if this is a phase advance or retry
+            target_role = decision.params.get("role")
+            last_role = orch.get("history", [{}])[-1].get("role") if orch.get("history") else None
+            if target_role == last_role:
+                detail["retries"] += 1
+            else:
+                detail["phase_advances"] += 1
+
+            orch["iteration"] = detail["total"]  # backward compat
             orch.setdefault("history", []).append({
-                "role": decision.params.get("role"),
+                "role": target_role,
                 "timestamp": bm.now_iso(),
                 "context": decision.params.get("context", ""),
+                "type": "new_spawn",
             })
             task["orchestration"] = orch
             bm.save_task(task)
@@ -2168,6 +2802,48 @@ def execute_decision(decision: Decision, task: dict) -> dict:
                 "action": action,
                 "role": role,
                 "spawn_instruction": spawn_instruction,
+                "iteration_info": _build_iteration_info(task),
+            }
+
+        elif action == "follow_up_worker":
+            role = decision.params.get("role")
+            orch = task.get("orchestration", {})
+
+            # Update iteration counters (A-04)
+            detail = orch.setdefault("iteration_detail", {"total": 0, "phase_advances": 0, "retries": 0})
+            detail["total"] += 1
+            detail["retries"] += 1  # follow_up only increments retries
+            orch["iteration"] = detail["total"]
+
+            # Record history
+            orch.setdefault("history", []).append({
+                "role": role,
+                "timestamp": bm.now_iso(),
+                "context": decision.params.get("context", ""),
+                "type": "follow_up",
+            })
+            task["orchestration"] = orch
+            bm.save_task(task)
+
+            session_id = _get_follow_up_session(task, role)
+            follow_up_message = decision.params.get("context", "")
+
+            # Append budget warning if applicable (A-06)
+            workers = task.get("orchestration", {}).get("active_workers", {})
+            worker = workers.get(role, {})
+            if worker:
+                follow_up_message += _budget_warning_text(
+                    worker.get("iterations_used", 0),
+                    worker.get("max_iterations", 0)
+                )
+
+            return {
+                "ok": True,
+                "action": "follow_up_worker",
+                "role": role,
+                "session_id": session_id,
+                "follow_up_message": follow_up_message,
+                "iteration_info": _build_iteration_info(task),
             }
 
         else:
@@ -2177,12 +2853,14 @@ def execute_decision(decision: Decision, task: dict) -> dict:
         return {"ok": False, "error": str(exc), "action": action}
 
 
-def handle_worker_completion(task_id: str, role: str = None) -> dict:
+def handle_worker_completion(task_id: str, role: str = None,
+                             dispatcher_advice: dict | None = None) -> dict:
     """Handle worker completion pipeline.
 
     Args:
         task_id: Task ID
         role: Optional expected role
+        dispatcher_advice: Optional dispatcher judgment (see make_decision)
 
     Returns:
         Result dict with decision info and optional spawn_instruction
@@ -2198,8 +2876,8 @@ def handle_worker_completion(task_id: str, role: str = None) -> dict:
         if report and not role:
             role = report.get("role")
 
-        # Make decision
-        decision = make_decision(report, task)
+        # Make decision (with optional dispatcher advice)
+        decision = make_decision(report, task, dispatcher_advice=dispatcher_advice)
 
         # Execute decision
         result = execute_decision(decision, task)
@@ -2406,6 +3084,143 @@ def _generate_tester_guidance_free(task: dict) -> str:
 
 
 # ──────────────────────────────────────────
+# Phase 2: Auditor, Architect Review, Retrospective guidance templates
+# ──────────────────────────────────────────
+
+def _generate_auditor_guidance(task: dict) -> str:
+    """Generate auditor guidance focused on FLOW auditing + test quality checking.
+
+    Auditor has dual responsibilities:
+    1. Flow audit: check orchestration path integrity, test coverage gaps
+    2. Test quality: identify test deficiencies and gaps that Tester missed
+
+    These are complementary to retrospective (which checks process-level issues).
+    """
+    pl = determine_process_level(task)
+    history = task.get("orchestration", {}).get("history", [])
+    actual_flow = [h.get("role") for h in history]
+
+    return f"""### Your Mission (Auditor — Flow Auditor + Test Quality)
+
+你的职责是审计整个调度链路的合理性，**并检查测试质量**（发现测试缺陷/盲区）。
+
+### 审计维度
+
+**A. 调度路径审计（Flow Audit）**
+1. **调度路径合理性** — 任务经过了哪些角色？是否有遗漏的环节？打回是否合理？
+   - 当前实际流程: {actual_flow}
+2. **验收方案覆盖率** — Tester 是否真正覆盖了 acceptance_plan 中的所有步骤？
+3. **设计-实现一致性** — Developer 的实现是否偏离了 Architect 的设计？
+4. **已知问题回归** — 之前发现的问题是否在本次修复中被正确处理？
+
+**B. 测试质量检查（Test Quality）**
+5. **测试真实性** — E2E 测试是否真正端到端（有 session 级/进程级证据）？还是只是函数调用伪装的？
+6. **测试盲区** — Tester 的测试是否遗漏了重要的边界条件、异常路径、回归场景？
+7. **测试深度** — 测试是否只覆盖了 happy path？负面测试是否充分？
+8. **证据可信度** — test_evidence 中的结果是否可复现、可验证？
+
+### 不做什么
+- ❌ 不做代码风格审查（那是 architect_review 的事）
+- ❌ 不重新运行测试（那是 Tester 的事）
+- ❌ 不评估设计方案好坏（那是 Plan Reviewer 的事）
+- ❌ 不检查流程跳步/环节缺失（那是 retrospective 的事）
+
+### 输出要求
+- verdict: pass / fail
+- 如果 fail，**必须**明确指出 suggested_target（该打回谁: developer / tester / architect）
+  - **developer**: 代码有 bug、实现缺失
+  - **architect**: 测试方案有盲区（需要补测试方案，然后 tester 补测）
+  - **tester**: 测试执行不到位（方案有但没执行到位）
+- 提供具体的问题描述和修复建议
+"""
+
+
+def _generate_architect_review_guidance(task: dict) -> str:
+    """Generate guidance for architect in code review mode (PL3 only)."""
+    return """### Your Mission (Architect — Code Review)
+
+你的职责是检查 Developer 的实现是否与设计方案一致，**不是重新做设计**。
+
+### 审查维度
+1. **设计一致性** — 实现是否偏离了设计方案？有无遗漏的设计要求？
+2. **接口契约** — 函数签名、返回类型、异常处理是否与设计一致？
+3. **边界条件** — 设计中提到的边界情况是否都处理了？
+4. **向后兼容** — 改动是否破坏了现有功能？
+5. **文档同步** — ARCHITECTURE.md / DEVLOG.md 是否与代码同步？
+
+### 不做什么
+- ❌ 不重新设计方案
+- ❌ 不做测试执行
+- ❌ 不做代码风格审查（只看设计一致性）
+
+### 输出
+- verdict: pass / fail
+- 如果 fail，列出具体的不一致之处
+"""
+
+
+def _generate_retrospective_guidance(task: dict) -> str:
+    """Generate retrospective guidance for flow completeness review.
+
+    Retrospective checks for process-level issues:
+    - Missing steps, skipped roles, bypassed gates
+    - Complementary to Auditor (which checks test quality + flow audit)
+    """
+    pl = determine_process_level(task)
+    history = task.get("orchestration", {}).get("history", [])
+
+    # Get expected flow for this PL
+    expected_flow = _get_expected_flow(pl)
+    actual_flow = [h.get("role") for h in history]
+
+    return f"""### Your Mission (Retrospective — 流程复盘)
+
+你的职责是复盘整个调度流程的**完整性和规范性**，检查是否有环节被跳过或缺失。
+
+### 流程信息
+- **流程级别**: {pl}
+- **应有流程**: {expected_flow}
+- **实际流程**: {actual_flow}
+
+### 检查清单（流程缺陷检查）
+1. **环节完整性** — 对照 {pl} 应有流程，检查实际流程是否有遗漏
+   - 注意：打回重试导致的重复角色是正常的，只检查是否有应有但从未出现的角色
+2. **打回合理性** — 每次打回是否有正当理由？打回后是否回到了正确的角色？
+3. **Gate 触发记录** — 代码 gate 是否正常工作？有无被绕过的情况？
+4. **跳步检测** — 是否有角色被直接跳过（不是因为打回，而是流程设计遗漏）？
+
+### 不做什么
+- ❌ 不检查测试质量（那是 Auditor 的事）
+- ❌ 不检查代码实现质量（那是 architect_review 的事）
+- ❌ 不重新运行测试（那是 Tester 的事）
+
+### 输出要求
+- **verdict: pass** — 流程完整，无缺失环节。如有流程设计改进建议，写入 issues
+- **verdict: fail** — 发现缺失环节，**必须**指明：
+  - missing_role: 缺失的角色（如 "tester", "architect" 等）
+  - missing_reason: 为什么认为缺失
+  - 状态机会根据 missing_role 打回补齐
+
+### 两种产出
+1. **即时修复（verdict=fail）**: 发现缺失环节 → 指明 missing_role → 状态机打回补齐
+2. **长期改进（verdict=pass + issues）**: 流程设计缺陷 → 记录到改进日志（不阻塞当前流程）
+"""
+
+
+def _get_expected_flow(pl: str) -> list[str]:
+    """Get the expected role sequence for a given process level."""
+    if pl == "PL0":
+        return ["developer"]
+    elif pl == "PL1":
+        return ["developer"]
+    elif pl == "PL2":
+        return ["architect", "developer", "tester", "retrospective"]
+    elif pl == "PL3":
+        return ["architect", "developer", "architect_review", "tester", "auditor", "retrospective"]
+    return ["developer"]  # fallback
+
+
+# ──────────────────────────────────────────
 # Worker prompt generation
 # ──────────────────────────────────────────
 
@@ -2494,6 +3309,20 @@ def generate_worker_prompt_v2(task: dict, role: str = "developer", prior_context
                 "文档路径: 项目根目录或 task 关联目录",
                 "⚠️ 调度器会检查文档完整性，缺少文档的报告会被打回。",
                 "",
+                "**冒烟测试要求（MUST — 代码任务必做）**:",
+                "完成代码后，必须执行基本冒烟测试：",
+                "1. `python -c \"import <your_module>\"` — 验证代码可导入",
+                "2. 主入口执行（如 `python script.py --help`）— 验证无启动报错",
+                "",
+                "在报告中记录：",
+                '```json',
+                '"smoke_test": {',
+                '    "command": "python -c \\"import scheduler\\"",',
+                '    "status": "pass",',
+                '    "output": "no errors"',
+                '}',
+                '```',
+                "",
                 "**Git Commit 规范**:",
                 "- commit message 必须包含 Task ID，格式: `feat(task_id): 描述`",
                 "- 例如: `feat(T-20260401-003): add design gate check`",
@@ -2524,6 +3353,30 @@ def generate_worker_prompt_v2(task: dict, role: str = "developer", prior_context
                 "",
             ]
 
+    elif role == "auditor":
+        lines += [_generate_auditor_guidance(task), ""]
+
+    elif role == "architect_review":
+        lines += [_generate_architect_review_guidance(task), ""]
+
+    elif role == "retrospective":
+        lines += [_generate_retrospective_guidance(task), ""]
+
+    # Role-specific report field hints
+    role_report_extra = ""
+    if role == "auditor":
+        role_report_extra = (
+            '\n  "suggested_target": "developer|tester|architect",'
+            '  // REQUIRED if verdict=fail — who to send back to'
+        )
+    elif role == "retrospective":
+        role_report_extra = (
+            '\n  "missing_role": "role_name",'
+            '  // REQUIRED if verdict=fail — which role was skipped'
+            '\n  "missing_reason": "why this role was needed"'
+            '  // REQUIRED if verdict=fail'
+        )
+
     # Report template
     lines += [
         "### Report Submission",
@@ -2539,7 +3392,7 @@ def generate_worker_prompt_v2(task: dict, role: str = "developer", prior_context
         '  "verdict": "pass|fail|blocked|partial",',
         '  "summary": "Free text describing what was done and key findings",',
         '  "issues": [{"description": "issue description"}],',
-        '  "files_changed": ["path/to/file"]',
+        f'  "files_changed": ["path/to/file"]{role_report_extra}',
         "}",
         "```",
         "",
@@ -2749,11 +3602,11 @@ def generate_spawn_instruction_v2(task: dict, role: str, prior_context: str = ""
     """
     task_id = task["id"]
     title = task.get("title", "未命名任务")
-    role_emoji = {"developer": "🔨", "tester": "🧪", "architect": "📐"}.get(role, "🔨")
+    role_emoji = {"developer": "🔨", "tester": "🧪", "architect": "📐",
+                  "auditor": "🔍", "architect_review": "📋", "retrospective": "🔄"}.get(role, "🔨")
 
-    # Role-based iteration limits
-    role_iterations = {"developer": 60, "tester": 30, "architect": 25}
-    max_iterations = role_iterations.get(role, 60)
+    # Role-based iteration limits (A-06: dynamic per Architect budget)
+    max_iterations = _get_role_iteration_limit(role, task)
 
     return {
         "task_id": task_id,
