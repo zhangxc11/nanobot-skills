@@ -148,32 +148,6 @@ VERIFICATION_GUIDANCE = {
 }
 
 
-def detect_task_category(task: dict) -> str:
-    """Detect task verification category based on title/description/template keywords."""
-    text = f"{task.get('title', '')} {task.get('description', '')}".lower()
-
-    if any(kw in text for kw in ["前端", "ui", "页面", "web", "html", "css", "browser", "界面", "dashboard"]):
-        return "web_frontend"
-    if any(kw in text for kw in ["飞书", "feishu", "lark", "消息卡片", "messenger"]):
-        return "feishu_integration"
-    if any(kw in text for kw in ["api", "接口", "endpoint", "http", "rest"]):
-        return "api_interface"
-    if any(kw in text for kw in ["数据", "data", "etl", "pipeline", "解析", "parse"]):
-        return "data_processing"
-
-    # B-1 fix: doc_only 分类 — 与 determine_process_level() 的 doc_signals 对齐
-    doc_signals = ["文档", "document", "调研", "research", "分析", "analysis",
-                   "报告", "report", "配置", "config", "整理", "梳理"]
-    code_signals = ["代码", "code", "实现", "implement", "修复", "fix", "bug",
-                    "开发", "develop", "功能", "feature", "重构", "refactor",
-                    ".py", ".ts", ".js", ".tsx", ".jsx", "scheduler", "前端", "后端", "api"]
-    has_doc = any(kw in text for kw in doc_signals)
-    has_code = any(kw in text for kw in code_signals)
-    if has_doc and not has_code:
-        return "doc_only"
-
-    return "backend_script"
-
 
 def determine_process_level(task: dict) -> str:
     """PL0-PL3 四级流程分级。保守策略：无法判断时默认 PL2。
@@ -468,7 +442,40 @@ MAX_TESTER_DEVELOPER_PINGPONG = 3
 # ── State machine feature flag ──
 STATE_MACHINE_ENABLED = os.environ.get("STATE_MACHINE_ENABLED", "1") != "0"
 
-# ── State transition table: (process_level, current_role, verdict) → next_action ──
+# ── Flow Type Templates ──
+FLOW_TEMPLATES = {
+    "standard-dev": {
+        "roles": ["architect", "architect_review", "developer", "code_review",
+                   "tester", "test_review"],
+        "description": "Standard development flow",
+        "has_auditor": True,
+        "has_retrospective": True,
+    },
+    "cron-auto": {
+        "roles": ["developer"],
+        "description": "Cron automatic task, single-step execution",
+        "has_auditor": False,
+        "has_retrospective": False,
+    },
+}
+
+
+def resolve_flow_type(task: dict) -> str:
+    """Read the task's flow type. No semantic guessing."""
+    # 1. Explicit flow_type field
+    ft = task.get("flow_type")
+    if ft and ft in FLOW_TEMPLATES:
+        return ft
+    # 2. Backward compat: process_level → flow_type mapping
+    pl = task.get("process_level")
+    PL_TO_FLOW = {"PL0": "cron-auto", "PL1": "standard-dev", "PL2": "standard-dev", "PL3": "standard-dev"}
+    if pl and pl in PL_TO_FLOW:
+        return PL_TO_FLOW[pl]
+    # 3. Default
+    return "standard-dev"
+
+
+# ── State transition table: (flow_type, current_role, verdict) → next_action ──
 # next_action can be:
 #   ("role", "xxx")       — dispatch to next role
 #   ("done",)             — mark task done
@@ -480,49 +487,23 @@ STATE_MACHINE_ENABLED = os.environ.get("STATE_MACHINE_ENABLED", "1") != "0"
 # If a gate fails, it returns a Decision directly (retry/escalate).
 
 FLOW_TRANSITIONS = {
-    # PL0: developer → done
-    ("PL0", "developer", "pass"):  ("done",),
-    ("PL0", "developer", "fail"):  ("retry", "developer"),
+    # cron-auto: developer → framework_closeout
+    ("cron-auto", "developer", "pass"):  ("framework_closeout",),
+    ("cron-auto", "developer", "fail"):  ("retry", "developer"),
 
-    # PL1: developer → done (skip tester)
-    ("PL1", "developer", "pass"):  ("done",),
-    ("PL1", "developer", "fail"):  ("retry", "developer"),
-
-    # PL2: architect → architect_review → developer → code_review → tester → test_review → retrospective → done/review
-    # V6.1: 新增 architect_review(开发前评审架构)、code_review(开发后检查代码+测试覆盖)、test_review(测试后语义审查)
-    ("PL2", "architect", "pass"):           ("role", "architect_review"),   # architect → architect_review (V6.1: 开发前评审架构)
-    ("PL2", "architect", "fail"):           ("blocked",),
-    ("PL2", "architect_review", "pass"):    ("role", "developer"),          # architect_review pass → developer
-    ("PL2", "architect_review", "fail"):    ("role", "architect"),          # architect_review fail → 打回 architect
-    ("PL2", "developer", "pass"):           ("role", "code_review"),        # developer → code_review (V6.1: 代码+测试覆盖检查)
-    ("PL2", "developer", "fail"):           ("retry", "developer"),
-    ("PL2", "code_review", "pass"):         ("role", "tester"),             # code_review pass → tester
-    ("PL2", "code_review", "fail"):         ("role", "developer"),          # code_review fail → 打回 developer (D11)
-    ("PL2", "tester", "pass"):              ("role", "test_review"),        # tester → test_review (V6.1: 测试语义审查)
-    ("PL2", "tester", "fail"):              ("role", "developer"),
-    ("PL2", "test_review", "pass"):         ("role", "retrospective"),      # test_review pass → retrospective
-    ("PL2", "test_review", "fail"):         ("role", "tester"),             # test_review fail → 打回 tester (D11)
-    ("PL2", "retrospective", "pass"):       ("review_check",),
-    ("PL2", "retrospective", "fail"):       ("retro_route",),
-
-    # PL3: architect → architect_review → developer → code_review → tester → test_review → auditor → retrospective → review
-    # V6.1: architect_review 移到 developer 前, 新增 code_review 在 developer 后, 新增 test_review 在 tester 后
-    ("PL3", "architect", "pass"):           ("role", "architect_review"),    # architect → architect_review (V6.1)
-    ("PL3", "architect", "fail"):           ("blocked",),
-    ("PL3", "architect_review", "pass"):    ("role", "developer"),           # architect_review pass → developer
-    ("PL3", "architect_review", "fail"):    ("role", "architect"),           # architect_review fail → 打回 architect
-    ("PL3", "developer", "pass"):           ("role", "code_review"),         # developer → code_review (V6.1)
-    ("PL3", "developer", "fail"):           ("retry", "developer"),
-    ("PL3", "code_review", "pass"):         ("role", "tester"),              # code_review pass → tester
-    ("PL3", "code_review", "fail"):         ("role", "developer"),           # code_review fail → 打回 developer
-    ("PL3", "tester", "pass"):              ("role", "test_review"),         # tester → test_review (V6.1)
-    ("PL3", "tester", "fail"):              ("role", "developer"),
-    ("PL3", "test_review", "pass"):         ("role", "auditor"),             # test_review pass → auditor (PL3)
-    ("PL3", "test_review", "fail"):         ("role", "tester"),              # test_review fail → 打回 tester
-    ("PL3", "auditor", "pass"):             ("role", "retrospective"),
-    ("PL3", "auditor", "fail"):             ("auditor_route",),
-    ("PL3", "retrospective", "pass"):       ("review",),
-    ("PL3", "retrospective", "fail"):       ("retro_route",),
+    # standard-dev: full flow ending at framework_closeout
+    ("standard-dev", "architect", "pass"):           ("role", "architect_review"),
+    ("standard-dev", "architect", "fail"):           ("blocked",),
+    ("standard-dev", "architect_review", "pass"):    ("role", "developer"),
+    ("standard-dev", "architect_review", "fail"):    ("role", "architect"),
+    ("standard-dev", "developer", "pass"):           ("role", "code_review"),
+    ("standard-dev", "developer", "fail"):           ("retry", "developer"),
+    ("standard-dev", "code_review", "pass"):         ("role", "tester"),
+    ("standard-dev", "code_review", "fail"):         ("role", "developer"),
+    ("standard-dev", "tester", "pass"):              ("role", "test_review"),
+    ("standard-dev", "tester", "fail"):              ("role", "developer"),
+    ("standard-dev", "test_review", "pass"):         ("framework_closeout",),
+    ("standard-dev", "test_review", "fail"):         ("role", "tester"),
 }
 
 
@@ -908,7 +889,6 @@ def _generate_default_acceptance_plan(task: dict, level: str = "standard") -> li
     Returns:
         list[dict] — each dict has step_id, description, category, expected_result, source, generated_at
     """
-    category = detect_task_category(task)
     timestamp = bm.now_iso()
 
     if level == "minimal":
@@ -921,20 +901,18 @@ def _generate_default_acceptance_plan(task: dict, level: str = "standard") -> li
              "source": "auto", "generated_at": timestamp},
         ]
 
-    # Standard: based on VERIFICATION_GUIDANCE
-    verification = VERIFICATION_GUIDANCE.get(category, VERIFICATION_GUIDANCE["backend_script"])
-    steps = []
-    for i, req in enumerate(verification["requirements"], 1):
-        cat = "e2e" if any(kw in req.lower() for kw in ["浏览器", "browser", "实际", "端到端"]) else "unit"
-        steps.append({
-            "step_id": f"A{i}",
-            "description": req,
-            "category": cat,
-            "expected_result": "验证通过",
-            "source": "auto",
-            "generated_at": timestamp,
-        })
-    return steps
+    # Standard: default verification steps
+    return [
+        {"step_id": "A1", "description": "单元测试覆盖核心逻辑",
+         "category": "unit", "expected_result": "测试通过",
+         "source": "auto", "generated_at": timestamp},
+        {"step_id": "A2", "description": "集成测试验证端到端流程",
+         "category": "e2e", "expected_result": "端到端验证通过",
+         "source": "auto", "generated_at": timestamp},
+        {"step_id": "A3", "description": "实际运行确认输出正确",
+         "category": "e2e", "expected_result": "功能正常工作",
+         "source": "auto", "generated_at": timestamp},
+    ]
 
 
 # ──────────────────────────────────────────
@@ -1246,12 +1224,12 @@ def _budget_warning_text(iterations_used: int, max_iterations: int) -> str:
 # State machine: gate checks + transition execution
 # ──────────────────────────────────────────
 
-def _gate_architect_plan(task: dict, report: dict, pl: str):
-    """Gate: check acceptance_plan when architect passes (PL2/PL3 only).
+def _gate_architect_plan(task: dict, report: dict, ft: str):
+    """Gate: check acceptance_plan when architect passes (standard-dev only).
 
     Returns Decision if gate fails, None if gate passes.
     """
-    if pl not in ("PL2", "PL3"):
+    if ft != "standard-dev":
         return None
 
     acceptance_plan = report.get("acceptance_plan")
@@ -1277,16 +1255,15 @@ def _gate_architect_plan(task: dict, report: dict, pl: str):
                 "每个步骤必须包含 step_id, description, category, expected_result。\n"
                 "代码任务必须包含至少一个 category='e2e' 的步骤。"
             )},
-            reason="architect passed but missing acceptance_plan for PL2/PL3 task"
+            reason="architect passed but missing acceptance_plan for standard-dev task"
         )
 
-    # Gate 2: e2e step check (code tasks only, not doc_only)
+    # Gate 2: e2e step check
     has_e2e = any(
         isinstance(s, dict) and s.get("category") == "e2e"
         for s in acceptance_plan
     )
-    task_category = detect_task_category(task)
-    if task_category != "doc_only" and not has_e2e:
+    if not has_e2e:
         retry_count = _count_acceptance_plan_retries(task)
         if retry_count >= MAX_ACCEPTANCE_PLAN_RETRY:
             # Exceeded retry limit → log warning, pass through
@@ -1333,15 +1310,15 @@ def _check_devlog_on_filesystem(task: dict, report: dict) -> bool:
     return False
 
 
-def _gate_developer_docs(task: dict, report: dict, pl: str):
-    """Gate: check docs when developer passes (PL2/PL3 only).
+def _gate_developer_docs(task: dict, report: dict, ft: str):
+    """Gate: check docs when developer passes (standard-dev only).
 
     Layer 1: DEVLOG existence check (new, stricter).
     Layer 2: Original doc triplet check (preserved).
-    PL0/PL1 skip this gate entirely.
+    cron-auto skips this gate entirely.
     Returns Decision if gate fails, None if gate passes.
     """
-    if pl in ("PL0", "PL1"):
+    if ft == "cron-auto":
         return None
 
     # --- Layer 1: DEVLOG existence ---
@@ -1419,7 +1396,7 @@ def _gate_developer_docs(task: dict, report: dict, pl: str):
     return None
 
 
-def _gate_tester_coverage(task: dict, report: dict, pl: str):
+def _gate_tester_coverage(task: dict, report: dict, ft: str):
     """Gate: check acceptance_plan coverage when tester passes.
 
     Backward-compatible: tasks without acceptance_plan skip this gate.
@@ -1436,8 +1413,8 @@ def _gate_tester_coverage(task: dict, report: dict, pl: str):
     coverage = len(covered_ids.intersection(plan_ids)) / len(plan_ids) if plan_ids else 1.0
     uncovered = plan_ids - covered_ids
 
-    # Dynamic threshold by PL
-    coverage_threshold = 1.0 if pl == "PL3" else 0.8
+    # Dynamic threshold by flow type (standard-dev uses 0.8, cron-auto skips)
+    coverage_threshold = 0.8
 
     if coverage < coverage_threshold:
         retry_count = _count_coverage_retries(task)
@@ -1501,18 +1478,13 @@ def _validate_state_transition(task: dict, target_state: str) -> tuple:
     return True, "ok"
 
 
-def _is_code_task(task: dict) -> bool:
-    """Check if task involves code changes (vs doc-only)."""
-    category = detect_task_category(task)
-    return category != "doc_only"
-
 
 def _assert_audit_completed(task: dict) -> None:
     """Pre-condition assertion: audit step must have been executed before mark_done.
 
-    For PL2: retrospective must have passed (retrospective serves as audit).
-    For PL3: auditor must have passed.
-    PL0/PL1: no audit required.
+    For standard-dev with has_retrospective: retrospective must have passed.
+    For standard-dev with has_auditor: auditor must have passed.
+    cron-auto: no audit required.
 
     This is a data-existence check (like a DB CHECK constraint), not a semantic
     judgment. It does not violate cross-check principles (D34).
@@ -1520,43 +1492,56 @@ def _assert_audit_completed(task: dict) -> None:
     Raises:
         ValueError: if required audit step was not completed
     """
-    pl = determine_process_level(task)
-    if pl in ("PL0", "PL1"):
-        return  # No audit required
+    ft = resolve_flow_type(task)
+    tpl = FLOW_TEMPLATES.get(ft, {})
+
+    if not tpl.get("has_auditor") and not tpl.get("has_retrospective"):
+        return  # No audit required (e.g. cron-auto)
 
     history = task.get("orchestration", {}).get("history", [])
 
-    if pl == "PL2":
-        # retrospective serves as audit in PL2
-        retro_passed = any(
-            h.get("role") == "retrospective" and h.get("verdict") == "pass"
-            for h in history
-        )
-        if not retro_passed:
-            raise ValueError(
-                f"PL2 task {task.get('id')} cannot be marked done: "
-                f"retrospective (audit) not completed"
-            )
-
-    elif pl == "PL3":
+    if tpl.get("has_auditor"):
         auditor_passed = any(
             h.get("role") == "auditor" and h.get("verdict") == "pass"
             for h in history
         )
         if not auditor_passed:
             raise ValueError(
-                f"PL3 task {task.get('id')} cannot be marked done: "
+                f"Task {task.get('id')} cannot be marked done: "
                 f"auditor not completed"
+            )
+    elif tpl.get("has_retrospective"):
+        retro_passed = any(
+            h.get("role") == "retrospective" and h.get("verdict") == "pass"
+            for h in history
+        )
+        if not retro_passed:
+            raise ValueError(
+                f"Task {task.get('id')} cannot be marked done: "
+                f"retrospective (audit) not completed"
             )
 
 
-def _run_gate_checks(task: dict, report: dict, role: str, verdict: str, pl: str):
+def _assert_audit_completed_safe(task: dict):
+    """Safe wrapper: returns Decision(mark_blocked) instead of raising."""
+    try:
+        _assert_audit_completed(task)
+        return None  # OK
+    except ValueError as e:
+        return Decision(
+            action="mark_blocked",
+            params={"reason": str(e)},
+            reason=f"audit assertion failed (safe degradation): {e}"
+        )
+
+
+def _run_gate_checks(task: dict, report: dict, role: str, verdict: str, ft: str):
     """Run role-specific gate checks before state transition.
 
     Returns None if all gates pass, or a Decision if a gate fails.
     """
     if role == "architect" and verdict == "pass":
-        return _gate_architect_plan(task, report, pl)
+        return _gate_architect_plan(task, report, ft)
 
     if role == "developer" and verdict == "pass":
         # Check blocker keywords in issues first (P0-4 fix)
@@ -1584,50 +1569,49 @@ def _run_gate_checks(task: dict, report: dict, role: str, verdict: str, pl: str)
                     reason="developer passed but issues contain blocker keywords — dispatching back"
                 )
         # Smoke test gate (A-12): code tasks must include smoke_test result
-        if _is_code_task(task):
-            smoke_test = report.get("smoke_test")
-            if not smoke_test or not isinstance(smoke_test, dict):
-                if _can_follow_up(task, "developer"):
-                    return Decision(
-                        action="follow_up_worker",
-                        params={
-                            "role": "developer",
-                            "context": (
-                                "⚠️ 报告缺少 smoke_test 字段。\n\n"
-                                "请在完成代码后执行基本冒烟测试并记录结果：\n"
-                                '在报告中添加: "smoke_test": {"command": "python -c \\"import module\\"", "status": "pass", "output": "..."}\n\n'
-                                "至少验证：(1) 代码可 import (2) 主入口可执行无报错"
-                            ),
-                        },
-                        reason="developer passed but no smoke_test"
-                    )
+        smoke_test = report.get("smoke_test")
+        if not smoke_test or not isinstance(smoke_test, dict):
+            if _can_follow_up(task, "developer"):
                 return Decision(
-                    action="dispatch_role",
-                    params={"role": "developer", "context": "⚠️ 缺少 smoke_test，请补充。"},
-                    reason="developer passed but no smoke_test — dispatching back"
+                    action="follow_up_worker",
+                    params={
+                        "role": "developer",
+                        "context": (
+                            "⚠️ 报告缺少 smoke_test 字段。\n\n"
+                            "请在完成代码后执行基本冒烟测试并记录结果：\n"
+                            '在报告中添加: "smoke_test": {"command": "python -c \\"import module\\"", "status": "pass", "output": "..."}\n\n'
+                            "至少验证：(1) 代码可 import (2) 主入口可执行无报错"
+                        ),
+                    },
+                    reason="developer passed but no smoke_test"
                 )
-            if smoke_test.get("status") != "pass":
-                if _can_follow_up(task, "developer"):
-                    return Decision(
-                        action="follow_up_worker",
-                        params={
-                            "role": "developer",
-                            "context": (
-                                f"⚠️ 冒烟测试未通过：\n"
-                                f"命令: {smoke_test.get('command', 'N/A')}\n"
-                                f"输出: {smoke_test.get('output', 'N/A')}\n\n"
-                                f"请修复后重新提交。"
-                            ),
-                        },
-                        reason=f"developer smoke_test failed: {smoke_test.get('output', '')[:100]}"
-                    )
+            return Decision(
+                action="dispatch_role",
+                params={"role": "developer", "context": "⚠️ 缺少 smoke_test，请补充。"},
+                reason="developer passed but no smoke_test — dispatching back"
+            )
+        if smoke_test.get("status") != "pass":
+            if _can_follow_up(task, "developer"):
                 return Decision(
-                    action="dispatch_role",
-                    params={"role": "developer", "context": "⚠️ 冒烟测试失败，请修复。"},
-                    reason="developer smoke_test failed — dispatching back"
+                    action="follow_up_worker",
+                    params={
+                        "role": "developer",
+                        "context": (
+                            f"⚠️ 冒烟测试未通过：\n"
+                            f"命令: {smoke_test.get('command', 'N/A')}\n"
+                            f"输出: {smoke_test.get('output', 'N/A')}\n\n"
+                            f"请修复后重新提交。"
+                        ),
+                    },
+                    reason=f"developer smoke_test failed: {smoke_test.get('output', '')[:100]}"
                 )
+            return Decision(
+                action="dispatch_role",
+                params={"role": "developer", "context": "⚠️ 冒烟测试失败，请修复。"},
+                reason="developer smoke_test failed — dispatching back"
+            )
         # Doc triplet gate
-        return _gate_developer_docs(task, report, pl)
+        return _gate_developer_docs(task, report, ft)
 
     if role == "tester" and verdict == "pass":
         # test_evidence format validation
@@ -1668,53 +1652,6 @@ def _run_gate_checks(task: dict, report: dict, role: str, verdict: str, pl: str)
                     },
                     reason="tester passed but no test_evidence"
                 )
-
-        # Category-aware evidence gate (P0-2 fix)
-        task_category = detect_task_category(task)
-        evidence = report.get("test_evidence") or report.get("test_results") or []
-        evidence_text = " ".join(
-            json.dumps(e, ensure_ascii=False) if isinstance(e, dict) else str(e)
-            for e in evidence
-        ).lower() if evidence else ""
-
-        category_evidence_ok = True
-        missing_reason = ""
-
-        if task_category == "web_frontend":
-            screenshot_keywords = ["screenshot", "截图", "browser", "playwright", "浏览器", "页面截图", "screen"]
-            if not any(kw in evidence_text for kw in screenshot_keywords):
-                category_evidence_ok = False
-                missing_reason = "Web 前端任务必须包含浏览器截图或 Playwright 验证证据"
-
-        if task_category == "feishu_integration":
-            feishu_keywords = ["消息", "message", "card", "卡片", "message_id", "截图", "screenshot"]
-            if not any(kw in evidence_text for kw in feishu_keywords):
-                category_evidence_ok = False
-                missing_reason = "飞书集成任务必须包含实际消息发送证据（消息ID/截图）"
-
-        if needs_dev_test(task):
-            dev_keywords = ["dev 环境", "dev env", "dev-workdir", "dev 实测", "localhost:9081", "localhost:9082", "localhost:8081", "localhost:8082", "dev环境", "dev server", "dev 部署", "localhost", "9081", "9082", "实测", "端到端"]
-            if not any(kw in evidence_text for kw in dev_keywords):
-                category_evidence_ok = False
-                missing_reason = (missing_reason + "; " if missing_reason else "") + \
-                    "涉及 nanobot 核心代码的任务必须包含 dev 环境实测证据"
-
-        if not category_evidence_ok:
-            summary = report.get("summary", "")
-            return Decision(
-                action="dispatch_role",
-                params={
-                    "role": "tester",
-                    "context": (
-                        f"⚠️ 测试证据不满足任务分类要求（{task_category}）:\n"
-                        f"{missing_reason}\n\n"
-                        f"请补充对应的验收证据后重新提交报告。\n"
-                        f"当前 test_evidence 内容: {json.dumps(evidence, ensure_ascii=False)}\n\n"
-                        f"之前的测试结论: {summary}"
-                    ),
-                },
-                reason=f"tester passed but evidence insufficient for category {task_category}: {missing_reason}"
-            )
 
         # Coverage gate
         return _gate_tester_coverage(task, report, pl)
@@ -1849,7 +1786,7 @@ def _build_handoff_context(from_role: str, to_role: str, report: dict,
         return summary
 
 
-def _execute_transition(task: dict, report: dict, transition: tuple, pl: str,
+def _execute_transition(task: dict, report: dict, transition: tuple, ft: str,
                         dispatcher_advice: dict | None = None) -> Decision:
     """Execute a state transition action."""
     action_type = transition[0]
@@ -1857,9 +1794,43 @@ def _execute_transition(task: dict, report: dict, transition: tuple, pl: str,
     role = report.get("role", "")
     history = task.get("orchestration", {}).get("history", [])
 
-    if action_type == "done":
-        _assert_audit_completed(task)  # Pre-condition assertion (D34)
-        return Decision(action="mark_done", reason=f"{pl} flow complete — {role} passed")
+    if action_type == "framework_closeout":
+        # Framework closeout chain: auditor → retrospective → done/review
+        tpl = FLOW_TEMPLATES.get(ft, {})
+        if tpl.get("has_auditor"):
+            context = _build_handoff_context(role, "auditor", report, task, summary)
+            if _can_follow_up(task, "auditor"):
+                return Decision(
+                    action="follow_up_worker",
+                    params={"role": "auditor", "context": context},
+                    reason=f"{ft} framework_closeout: dispatching auditor (follow_up)"
+                )
+            return Decision(
+                action="dispatch_role",
+                params={"role": "auditor", "context": context},
+                reason=f"{ft} framework_closeout: dispatching auditor"
+            )
+        elif tpl.get("has_retrospective"):
+            context = _build_handoff_context(role, "retrospective", report, task, summary)
+            if _can_follow_up(task, "retrospective"):
+                return Decision(
+                    action="follow_up_worker",
+                    params={"role": "retrospective", "context": context},
+                    reason=f"{ft} framework_closeout: dispatching retrospective (follow_up)"
+                )
+            return Decision(
+                action="dispatch_role",
+                params={"role": "retrospective", "context": context},
+                reason=f"{ft} framework_closeout: dispatching retrospective"
+            )
+        else:
+            return _closeout_done_or_review(task, report, ft)
+
+    elif action_type == "done":
+        safe_result = _assert_audit_completed_safe(task)
+        if safe_result is not None:
+            return safe_result
+        return Decision(action="mark_done", reason=f"{ft} flow complete — {role} passed")
 
     elif action_type == "role":
         next_role = transition[1]
@@ -1870,12 +1841,12 @@ def _execute_transition(task: dict, report: dict, transition: tuple, pl: str,
             return Decision(
                 action="follow_up_worker",
                 params={"role": next_role, "context": context},
-                reason=f"{pl} transition: {role} → {next_role} (follow_up existing worker)"
+                reason=f"{ft} transition: {role} → {next_role} (follow_up existing worker)"
             )
         return Decision(
             action="dispatch_role",
             params={"role": next_role, "context": context},
-            reason=f"{pl} transition: {role} → {next_role}"
+            reason=f"{ft} transition: {role} → {next_role}"
         )
 
     elif action_type == "retry":
@@ -1912,7 +1883,7 @@ def _execute_transition(task: dict, report: dict, transition: tuple, pl: str,
                     params={"summary": f"⚠️ tester passed but docs incomplete ({', '.join(doc_missing)}). {summary}"},
                     reason=f"tester passed but docs missing {doc_missing}, upgrading to manual review"
                 )
-            _assert_audit_completed(task)  # Pre-condition assertion (D34)
+            _assert_audit_completed_safe(task)  # Pre-condition assertion (D34) — safe version
             return Decision(
                 action="mark_done",
                 reason=f"tester passed, docs verified, review level {review_level}"
@@ -1928,7 +1899,7 @@ def _execute_transition(task: dict, report: dict, transition: tuple, pl: str,
         return Decision(
             action="promote_to_review",
             params={"summary": summary},
-            reason=f"{pl} requires mandatory review"
+            reason=f"{ft} requires mandatory review"
         )
 
     elif action_type == "blocked":
@@ -1939,11 +1910,11 @@ def _execute_transition(task: dict, report: dict, transition: tuple, pl: str,
 
     elif action_type == "auditor_route":
         # Phase 2: Auditor fail → route to appropriate role
-        return _handle_auditor_route(task, report, pl, dispatcher_advice)
+        return _handle_auditor_route(task, report, ft, dispatcher_advice)
 
     elif action_type == "retro_route":
         # Phase 2: Retrospective fail → route to missing role
-        return _handle_retro_route(task, report, pl)
+        return _handle_retro_route(task, report, ft)
 
     # Unknown transition type — should not happen
     return Decision(
@@ -1957,7 +1928,7 @@ def _execute_transition(task: dict, report: dict, transition: tuple, pl: str,
 # Phase 2: Auditor route + Retrospective route
 # ──────────────────────────────────────────
 
-def _handle_auditor_route(task: dict, report: dict, pl: str,
+def _handle_auditor_route(task: dict, report: dict, ft: str,
                           dispatcher_advice: dict | None = None) -> Decision:
     """When auditor fails, determine who to send back to.
 
@@ -2017,7 +1988,7 @@ def _build_auditor_feedback(report: dict, target: str) -> str:
     return "\n".join(lines)
 
 
-def _handle_retro_route(task: dict, report: dict, pl: str) -> Decision:
+def _handle_retro_route(task: dict, report: dict, ft: str) -> Decision:
     """When retrospective fails (missing steps found), route back to fill gaps.
 
     If retrospective has already retried MAX_RETRO_RETRY times, force pass
@@ -2028,7 +1999,7 @@ def _handle_retro_route(task: dict, report: dict, pl: str) -> Decision:
     if retro_retries >= MAX_RETRO_RETRY:
         # Exceeded retry limit → record issue and pass through
         _record_retro_issue(task, report)
-        if pl == "PL3":
+        if FLOW_TEMPLATES.get(ft, {}).get("has_auditor"):
             return Decision(
                 action="promote_to_review",
                 params={"summary": f"⚠️ 流程复盘超过重试限制 ({MAX_RETRO_RETRY})，升级人工 review。"},
@@ -2037,14 +2008,14 @@ def _handle_retro_route(task: dict, report: dict, pl: str) -> Decision:
         else:
             return Decision(
                 action="mark_done",
-                reason=f"retrospective retry limit reached ({retro_retries}), force passing (PL2)"
+                reason=f"retrospective retry limit reached ({retro_retries}), force passing"
             )
 
     missing_role = report.get("missing_role")
     if not missing_role or missing_role not in VALID_ROLES:
         # Cannot determine missing role → record issue and pass through
         _record_retro_issue(task, report)
-        if pl == "PL3":
+        if FLOW_TEMPLATES.get(ft, {}).get("has_auditor"):
             return Decision(
                 action="promote_to_review",
                 params={"summary": "⚠️ 流程复盘发现问题但无法确定缺失角色，升级人工 review。"},
@@ -2053,7 +2024,7 @@ def _handle_retro_route(task: dict, report: dict, pl: str) -> Decision:
         else:
             return Decision(
                 action="mark_done",
-                reason="retrospective fail but unclear target (PL2)"
+                reason="retrospective fail but unclear target"
             )
 
     missing_reason = report.get("missing_reason", "未说明原因")
@@ -2065,6 +2036,50 @@ def _handle_retro_route(task: dict, report: dict, pl: str) -> Decision:
         },
         reason=f"retrospective found missing {missing_role} step"
     )
+
+
+def _dispatch_retrospective(task: dict, report: dict, ft: str) -> Decision:
+    """Dispatch the retrospective role after auditor passes."""
+    summary = report.get("summary", "")
+    context = _build_handoff_context("auditor", "retrospective", report, task, summary)
+    if _can_follow_up(task, "retrospective"):
+        return Decision(
+            action="follow_up_worker",
+            params={"role": "retrospective", "context": context},
+            reason=f"{ft} framework_closeout: auditor passed → retrospective (follow_up)"
+        )
+    return Decision(
+        action="dispatch_role",
+        params={"role": "retrospective", "context": context},
+        reason=f"{ft} framework_closeout: auditor passed → retrospective"
+    )
+
+
+def _closeout_done_or_review(task: dict, report: dict, ft: str) -> Decision:
+    """Final closeout: check review_level, doc_triplet, audit assertion, then done or review."""
+    summary = report.get("summary", "")
+    review_level = bm.determine_review_level(task)
+    if review_level in ("L0", "L1"):
+        doc_ok, doc_missing = check_doc_triplet(task, report)
+        if not doc_ok:
+            return Decision(
+                action="promote_to_review",
+                params={"summary": f"⚠️ docs incomplete ({', '.join(doc_missing)}). {summary}"},
+                reason=f"closeout: docs missing {doc_missing}, upgrading to manual review"
+            )
+        safe_result = _assert_audit_completed_safe(task)
+        if safe_result is not None:
+            return safe_result
+        return Decision(
+            action="mark_done",
+            reason=f"{ft} flow complete, docs verified, review level {review_level}"
+        )
+    else:
+        return Decision(
+            action="promote_to_review",
+            params={"summary": summary},
+            reason=f"{ft} flow complete, promoting to {review_level} review"
+        )
 
 
 def _record_retro_issue(task: dict, report: dict):
@@ -2128,7 +2143,7 @@ def make_decision(report: dict | None, task: dict,
     if iteration >= max_iter:
         return Decision(
             action="mark_blocked",
-            reason=f"max iterations reached ({iteration}/{max_iter}, PL={determine_process_level(task)})"
+            reason=f"max iterations reached ({iteration}/{max_iter}, ft={resolve_flow_type(task)})"
         )
 
     # No report found
@@ -2193,10 +2208,23 @@ def make_decision(report: dict | None, task: dict,
 
     # ── State machine path (default) ──
     if STATE_MACHINE_ENABLED:
-        pl = determine_process_level(task)
+        ft = resolve_flow_type(task)
+
+        # Framework closeout chain: auditor → retrospective → done/review
+        if role == "auditor":
+            if verdict == "pass":
+                return _dispatch_retrospective(task, report, ft)
+            else:
+                return _handle_auditor_route(task, report, ft, dispatcher_advice)
+
+        if role == "retrospective":
+            if verdict == "pass":
+                return _closeout_done_or_review(task, report, ft)
+            else:
+                return _handle_retro_route(task, report, ft)
 
         # Step 1: Role-specific gate checks (before table lookup) — hard gate
-        gate_result = _run_gate_checks(task, report, role, verdict, pl)
+        gate_result = _run_gate_checks(task, report, role, verdict, ft)
         if gate_result is not None:
             return gate_result
 
@@ -2204,16 +2232,16 @@ def make_decision(report: dict | None, task: dict,
         # Audit is now handled by auditor worker reading dispatcher session jsonl.
 
         # Step 2: Look up state transition table
-        transition = FLOW_TRANSITIONS.get((pl, role, verdict))
+        transition = FLOW_TRANSITIONS.get((ft, role, verdict))
         if transition is None:
             return Decision(
                 action="promote_to_review",
-                params={"summary": f"未知状态转移: PL={pl}, role={role}, verdict={verdict}"},
-                reason=f"no transition defined for ({pl}, {role}, {verdict})"
+                params={"summary": f"未知状态转移: ft={ft}, role={role}, verdict={verdict}"},
+                reason=f"no transition defined for ({ft}, {role}, {verdict})"
             )
 
         # Step 3: Execute transition
-        return _execute_transition(task, report, transition, pl)
+        return _execute_transition(task, report, transition, ft)
 
     # ── Legacy if-else path (STATE_MACHINE_ENABLED=False) ──
     return _make_decision_legacy(report, task, role, verdict, summary, history)
@@ -2253,7 +2281,7 @@ def _make_decision_legacy(report: dict, task: dict, role: str, verdict: str,
                                 "每个步骤必须包含 step_id, description, category, expected_result。\n"
                                 "代码任务必须包含至少一个 category='e2e' 的步骤。"
                             )},
-                            reason="architect passed but missing acceptance_plan for PL2/PL3 task"
+                            reason="architect passed but missing acceptance_plan for standard-dev task"
                         )
 
                 if acceptance_plan and isinstance(acceptance_plan, list) and len(acceptance_plan) > 0:
@@ -2261,8 +2289,7 @@ def _make_decision_legacy(report: dict, task: dict, role: str, verdict: str,
                         isinstance(s, dict) and s.get("category") == "e2e"
                         for s in acceptance_plan
                     )
-                    task_category = detect_task_category(task)
-                    if task_category != "doc_only" and not has_e2e:
+                    if not has_e2e:
                         retry_count = _count_acceptance_plan_retries(task)
                         if retry_count >= MAX_ACCEPTANCE_PLAN_RETRY:
                             pass  # Exceeded retry limit → pass through
@@ -2348,52 +2375,6 @@ def _make_decision_legacy(report: dict, task: dict, role: str, verdict: str,
                         },
                         reason="tester passed but no test_evidence"
                     )
-
-            # Category-aware evidence gate (P0-2 fix)
-            task_category = detect_task_category(task)
-            evidence = report.get("test_evidence") or report.get("test_results") or []
-            evidence_text = " ".join(
-                json.dumps(e, ensure_ascii=False) if isinstance(e, dict) else str(e)
-                for e in evidence
-            ).lower() if evidence else ""
-
-            category_evidence_ok = True
-            missing_reason = ""
-
-            if task_category == "web_frontend":
-                screenshot_keywords = ["screenshot", "截图", "browser", "playwright", "浏览器", "页面截图", "screen"]
-                if not any(kw in evidence_text for kw in screenshot_keywords):
-                    category_evidence_ok = False
-                    missing_reason = "Web 前端任务必须包含浏览器截图或 Playwright 验证证据"
-
-            if task_category == "feishu_integration":
-                feishu_keywords = ["消息", "message", "card", "卡片", "message_id", "截图", "screenshot"]
-                if not any(kw in evidence_text for kw in feishu_keywords):
-                    category_evidence_ok = False
-                    missing_reason = "飞书集成任务必须包含实际消息发送证据（消息ID/截图）"
-
-            if needs_dev_test(task):
-                dev_keywords = ["dev 环境", "dev env", "dev-workdir", "dev 实测", "localhost:9081", "localhost:9082", "localhost:8081", "localhost:8082", "dev环境", "dev server", "dev 部署", "localhost", "9081", "9082", "实测", "端到端"]
-                if not any(kw in evidence_text for kw in dev_keywords):
-                    category_evidence_ok = False
-                    missing_reason = (missing_reason + "; " if missing_reason else "") + \
-                        "涉及 nanobot 核心代码的任务必须包含 dev 环境实测证据"
-
-            if not category_evidence_ok:
-                return Decision(
-                    action="dispatch_role",
-                    params={
-                        "role": "tester",
-                        "context": (
-                            f"⚠️ 测试证据不满足任务分类要求（{task_category}）:\n"
-                            f"{missing_reason}\n\n"
-                            f"请补充对应的验收证据后重新提交报告。\n"
-                            f"当前 test_evidence 内容: {json.dumps(evidence, ensure_ascii=False)}\n\n"
-                            f"之前的测试结论: {summary}"
-                        ),
-                    },
-                    reason=f"tester passed but evidence insufficient for category {task_category}: {missing_reason}"
-                )
 
             # acceptance_plan coverage check
             acceptance_plan = task.get("acceptance_plan")
@@ -3017,21 +2998,12 @@ def _generate_tester_guidance(task: dict) -> str:
 
 def _generate_tester_guidance_with_plan(task: dict, acceptance_plan: list) -> str:
     """Plan-execution mode: tester follows the acceptance_plan step by step."""
-    category = detect_task_category(task)
-    verification = VERIFICATION_GUIDANCE.get(category, VERIFICATION_GUIDANCE["backend_script"])
-
-    category_lines = [
-        f"\n**任务分类验收要求（{verification['label']}）— MUST:**",
-    ]
-    for req in verification["requirements"]:
-        category_lines.append(f"- {req}")
-    category_lines.append("")
 
     dev_env_section = ""
     if needs_dev_test(task):
         dev_env_section = f"\n\n{DEV_ENV_GUIDANCE}"
 
-    category_block = "\n".join(category_lines) + dev_env_section
+    category_block = dev_env_section
 
     # Build plan steps text
     plan_lines = []
@@ -3081,24 +3053,12 @@ def _generate_tester_guidance_free(task: dict) -> str:
     Includes auditable rule subset: code scope, commit format, docs, test coverage.
     Process rules (env, branch) are validated by Dispatcher, not Tester.
     """
-    # ── Category-specific verification requirements ──
-    category = detect_task_category(task)
-    verification = VERIFICATION_GUIDANCE.get(category, VERIFICATION_GUIDANCE["backend_script"])
-
-    category_lines = [
-        f"\n**任务分类验收要求（{verification['label']}）— MUST:**",
-    ]
-    for req in verification["requirements"]:
-        category_lines.append(f"- {req}")
-    category_lines.append("")
-    category_lines.append("> ⚠️ 纯 mock 测试不能算验收通过。涉及 Web 前端的任务必须浏览器实测+截图。")
-
     # ── Dev environment test requirement (conditional) ──
     dev_env_section = ""
     if needs_dev_test(task):
         dev_env_section = f"\n\n{DEV_ENV_GUIDANCE}"
 
-    category_block = "\n".join(category_lines) + dev_env_section
+    category_block = dev_env_section
 
     return f"""### Your Mission (Tester)
 
@@ -3301,11 +3261,11 @@ def _generate_retrospective_guidance(task: dict) -> str:
     - Complementary to Auditor (which checks test quality + flow audit)
     [V6.1] Enhanced: inject dispatcher session jsonl path for flow verification (D31).
     """
-    pl = determine_process_level(task)
+    ft = resolve_flow_type(task)
     history = task.get("orchestration", {}).get("history", [])
 
-    # Get expected flow for this PL
-    expected_flow = _get_expected_flow(pl)
+    # Get expected flow for this flow type
+    expected_flow = _get_expected_flow(ft)
     actual_flow = [h.get("role") for h in history]
 
     # V6.1: Inject dispatcher session jsonl path for audit verification (D31)
@@ -3355,16 +3315,16 @@ def _generate_retrospective_guidance(task: dict) -> str:
 """
 
 
-def _get_expected_flow(pl: str) -> list[str]:
-    """Get the expected role sequence for a given process level."""
-    if pl == "PL0":
-        return ["developer"]
-    elif pl == "PL1":
-        return ["developer"]
-    elif pl == "PL2":
-        return ["architect", "architect_review", "developer", "code_review", "tester", "test_review", "retrospective"]
-    elif pl == "PL3":
-        return ["architect", "architect_review", "developer", "code_review", "tester", "test_review", "auditor", "retrospective"]
+def _get_expected_flow(ft: str) -> list[str]:
+    """Get the expected role sequence for a given flow type."""
+    tpl = FLOW_TEMPLATES.get(ft)
+    if tpl:
+        roles = list(tpl["roles"])
+        if tpl.get("has_auditor"):
+            roles.append("auditor")
+        if tpl.get("has_retrospective"):
+            roles.append("retrospective")
+        return roles
     return ["developer"]  # fallback
 
 
@@ -3583,8 +3543,7 @@ def _generate_worker_prompt_legacy(task: dict) -> str:
 
     review_level = bm.determine_review_level(task)
     review_roles = bm.get_review_roles(review_level, task)
-    category = detect_task_category(task)
-    verification = VERIFICATION_GUIDANCE.get(category, VERIFICATION_GUIDANCE["backend_script"])
+    verification = VERIFICATION_GUIDANCE["backend_script"]
 
     lines = [
         "## 任务执行指令",
@@ -4006,6 +3965,24 @@ def run_scheduler(
                 continue
 
         dispatched.append(generate_spawn_instruction(task, parent_session_id, role=initial_role))
+
+        # M3: Write initial orchestration history record after first dispatch
+        if not dry_run:
+            try:
+                orch = task.setdefault("orchestration", {})
+                orch.setdefault("history", []).append({
+                    "role": initial_role,
+                    "timestamp": bm.now_iso(),
+                    "context": "initial dispatch",
+                    "type": "initial_spawn",
+                })
+                orch["current_role"] = initial_role
+                detail = orch.setdefault("iteration_detail", {})
+                detail["total"] = detail.get("total", 0) + 1
+                detail["phase_advances"] = detail.get("phase_advances", 0) + 1
+                bm.save_task(task)
+            except Exception:
+                pass
 
     # 6. Review follow-up check
     review_pending = check_completed_tasks()
