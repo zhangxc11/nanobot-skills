@@ -1596,7 +1596,8 @@ def _run_gate_checks(task: dict, report: dict, role: str, verdict: str, ft: str)
                 )
 
         # Coverage gate
-        return _gate_tester_coverage(task, report, pl)
+        ft = resolve_flow_type(task)
+        return _gate_tester_coverage(task, report, ft)
 
     if role == "tester" and verdict == "fail":
         # m-6: ping-pong protection before dispatching developer
@@ -3227,12 +3228,12 @@ def _generate_retrospective_guidance(task: dict) -> str:
 你的职责是复盘整个调度流程的**完整性和规范性**，检查是否有环节被跳过或缺失。
 {session_jsonl_section}
 ### 流程信息
-- **流程级别**: {pl}
+- **流程类型**: {ft}
 - **应有流程**: {expected_flow}
 - **实际流程**: {actual_flow}
 
 ### 检查清单（流程缺陷检查）
-1. **环节完整性** — 对照 {pl} 应有流程，检查实际流程是否有遗漏
+1. **环节完整性** — 对照 {ft} 应有流程，检查实际流程是否有遗漏
    - 注意：打回重试导致的重复角色是正常的，只检查是否有应有但从未出现的角色
 2. **打回合理性** — 每次打回是否有正当理由？打回后是否回到了正确的角色？
 3. **Gate 触发记录** — 代码 gate 是否正常工作？有无被绕过的情况？
