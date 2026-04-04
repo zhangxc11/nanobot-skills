@@ -1726,7 +1726,8 @@ class TestParseWorkerReport:
 class TestMakeDecision:
     """Test make_decision function."""
 
-    def test_tester_pass_l2_promotes_review(self):
+    def test_tester_pass_l2_dispatches_test_review(self):
+        """V6.1: PL2 tester pass → test_review (was promote_to_review)."""
         import scheduler as sched
         report = {
             "task_id": "T-001",
@@ -1743,21 +1744,23 @@ class TestMakeDecision:
         }
 
         decision = sched.make_decision(report, task)
-        assert decision.action == "promote_to_review"
+        assert decision.action == "dispatch_role"
+        assert decision.params["role"] == "test_review"
 
-    def test_tester_pass_l0_marks_done(self):
+    def test_developer_pass_pl0_marks_done(self):
+        """PL0 (quick): developer pass → mark_done directly."""
         import scheduler as sched
         report = {
             "task_id": "T-001",
-            "role": "tester",
+            "role": "developer",
             "verdict": "pass",
-            "summary": "Tests passed",
-            "test_evidence": [{"type": "command_output", "command": "pytest", "result": "3 passed"}],
+            "summary": "Quick task done",
+            "smoke_test": {"status": "pass", "output": "OK"},
         }
         task = {
             "id": "T-001",
             "priority": "P2",
-            "workgroup": {"template": "quick"},  # L0 template
+            "workgroup": {"template": "quick"},  # PL0 template
             "orchestration": {"iteration": 1, "history": []},
         }
 
@@ -1784,7 +1787,8 @@ class TestMakeDecision:
         assert decision.action == "dispatch_role"
         assert decision.params["role"] == "developer"
 
-    def test_developer_pass_dispatches_tester(self):
+    def test_developer_pass_dispatches_code_review(self):
+        """V6.1: PL2 developer pass → code_review (was tester)."""
         import scheduler as sched
         report = {
             "task_id": "T-001",
@@ -1792,6 +1796,7 @@ class TestMakeDecision:
             "verdict": "pass",
             "summary": "Implementation complete",
             "files_changed": ["src/main.py", "DEVLOG.md"],
+            "smoke_test": {"status": "pass", "output": "import OK, 5 tests passed"},
         }
         task = {
             "id": "T-001",
@@ -1803,15 +1808,17 @@ class TestMakeDecision:
 
         decision = sched.make_decision(report, task)
         assert decision.action == "dispatch_role"
-        assert decision.params["role"] == "tester"
+        assert decision.params["role"] == "code_review"
 
     def test_developer_pass_quick_marks_done(self):
+        """PL0 (quick): developer pass → mark_done. Needs smoke_test for code tasks."""
         import scheduler as sched
         report = {
             "task_id": "T-001",
             "role": "developer",
             "verdict": "pass",
             "summary": "Quick task done",
+            "smoke_test": {"status": "pass", "output": "OK"},
         }
         task = {
             "id": "T-001",
@@ -1878,7 +1885,7 @@ class TestMakeDecision:
             "id": "T-001",
             "priority": "P1",
             "workgroup": {"template": "standard-dev"},
-            "orchestration": {"iteration": 5, "history": []},
+            "orchestration": {"iteration": 10, "history": []},
         }
 
         decision = sched.make_decision(report, task)
@@ -2000,8 +2007,9 @@ class TestMakeDecision:
 
     # --- Consecutive role limit: only blocks partial, not pass/fail ---
 
-    def test_developer_consecutive_pass_dispatches_tester(self):
-        """T-004 scenario: developer partial → developer pass → should go to tester, NOT blocked."""
+    def test_developer_consecutive_pass_dispatches_code_review(self):
+        """T-004 scenario: developer partial → developer pass → should go to code_review, NOT blocked.
+        V6.1: was tester, now code_review."""
         import scheduler as sched
         report = {
             "task_id": "T-004",
@@ -2009,6 +2017,7 @@ class TestMakeDecision:
             "verdict": "pass",
             "summary": "Implementation complete after partial",
             "files_changed": ["src/main.py", "DEVLOG.md"],
+            "smoke_test": {"status": "pass", "output": "OK"},
         }
         task = {
             "id": "T-004",
@@ -2026,7 +2035,7 @@ class TestMakeDecision:
 
         decision = sched.make_decision(report, task)
         assert decision.action == "dispatch_role"
-        assert decision.params["role"] == "tester"
+        assert decision.params["role"] == "code_review"
         assert "blocked" not in decision.reason.lower()
 
     def test_developer_consecutive_partial_blocks(self):
@@ -2055,8 +2064,9 @@ class TestMakeDecision:
         assert decision.action == "mark_blocked"
         assert "consecutive" in decision.reason.lower()
 
-    def test_tester_consecutive_pass_promotes_review(self):
-        """Tester pass after consecutive tester rounds → should promote to review, NOT blocked."""
+    def test_tester_consecutive_pass_dispatches_test_review(self):
+        """Tester pass after consecutive tester rounds → should dispatch test_review, NOT blocked.
+        V6.1: was promote_to_review/mark_done, now test_review."""
         import scheduler as sched
         report = {
             "task_id": "T-006",
@@ -2079,8 +2089,9 @@ class TestMakeDecision:
         }
 
         decision = sched.make_decision(report, task)
-        # Should promote to review (L2+) or mark_done (L0/L1), NOT blocked
-        assert decision.action in ("promote_to_review", "mark_done")
+        # V6.1: tester pass → test_review (dispatch_role)
+        assert decision.action == "dispatch_role"
+        assert decision.params["role"] == "test_review"
 
     def test_tester_fail_dispatches_developer_regardless_of_consecutive(self):
         """Tester fail → developer, even after consecutive tester rounds."""
@@ -2253,7 +2264,8 @@ class TestHandleWorkerCompletion:
         assert reloaded["status"] == "executing"
         assert "orchestration" in reloaded
 
-    def test_full_pipeline_developer_pass_to_tester(self, tmp_path, monkeypatch):
+    def test_full_pipeline_developer_pass_to_code_review(self, tmp_path, monkeypatch):
+        """V6.1: developer pass → code_review (was tester)."""
         import scheduler as sched
         import brain_manager as bm
 
@@ -2266,7 +2278,7 @@ class TestHandleWorkerCompletion:
         task["design_ref"] = "D-test-001"
         bm.save_task(task)
 
-        # Write developer pass report (include DEVLOG in files_changed)
+        # Write developer pass report (include DEVLOG in files_changed + smoke_test)
         report_file = reports_dir / "T-001-developer-1234567890.json"
         with report_file.open("w") as f:
             json.dump({
@@ -2275,14 +2287,16 @@ class TestHandleWorkerCompletion:
                 "verdict": "pass",
                 "summary": "Implementation complete",
                 "files_changed": ["main.py", "DEVLOG.md"],
+                "smoke_test": {"status": "pass", "output": "OK"},
             }, f)
 
         result = sched.handle_worker_completion("T-001", "developer")
         assert result["ok"] is True
         assert result["decision"]["action"] == "dispatch_role"
-        assert result["role"] == "tester"
+        assert result["role"] == "code_review"
 
-    def test_full_pipeline_tester_pass_to_review(self, tmp_path, monkeypatch):
+    def test_full_pipeline_tester_pass_to_test_review(self, tmp_path, monkeypatch):
+        """V6.1: tester pass → test_review (was promote_to_review)."""
         import scheduler as sched
         import brain_manager as bm
 
@@ -2305,11 +2319,8 @@ class TestHandleWorkerCompletion:
 
         result = sched.handle_worker_completion("T-001", "tester")
         assert result["ok"] is True
-        assert result["decision"]["action"] == "promote_to_review"
-
-        # Verify task in review status
-        reloaded = bm.load_task("T-001")
-        assert reloaded["status"] == "review"
+        assert result["decision"]["action"] == "dispatch_role"
+        assert result["role"] == "test_review"
 
 
 class TestGenerateWorkerPromptV2:
@@ -2596,22 +2607,25 @@ class TestDocRetryEscalation:
         assert decision.params["role"] == "developer"
 
     def test_developer_pass_missing_docs_escalates_after_max_retry(self, tmp_path, monkeypatch):
+        """Developer pass with missing docs escalates to review after MAX_DOC_RETRY retries."""
         import scheduler as sched
         reports_dir = tmp_path / "reports"
         reports_dir.mkdir()
         monkeypatch.setattr(sched, "REPORTS_DIR", reports_dir)
         report = {"task_id": "T-001", "role": "developer", "verdict": "pass",
-                  "summary": "Done again", "files_changed": ["main.py"]}
+                  "summary": "Done again", "files_changed": ["main.py"],
+                  "smoke_test": {"status": "pass", "output": "OK"}}
         task = {"id": "T-001", "priority": "P1",
                 "workgroup": {"template": "standard-dev"},
                 "orchestration": {"iteration": 3, "history": [
-                    {"role": "developer", "verdict": "pass", "reason": "developer passed but missing docs: ['DEVLOG.md']"},
-                    {"role": "developer", "verdict": "pass", "reason": "developer passed but missing docs: ['DEVLOG.md']"},
+                    {"role": "developer", "verdict": "pass", "context": "⚠️ 文档三件套不完整，缺少: missing docs"},
+                    {"role": "developer", "verdict": "pass", "context": "⚠️ 文档三件套不完整，缺少: missing docs"},
                 ]}}
         decision = sched.make_decision(report, task)
         assert decision.action == "promote_to_review"
 
-    def test_tester_pass_l0_missing_docs_promotes_review(self, tmp_path, monkeypatch):
+    def test_tester_pass_dispatches_test_review(self, tmp_path, monkeypatch):
+        """V6.1: PL2 tester pass → test_review (doc check happens at review_check after retrospective)."""
         import scheduler as sched
         reports_dir = tmp_path / "reports"
         reports_dir.mkdir()
@@ -2619,13 +2633,347 @@ class TestDocRetryEscalation:
         report = {"task_id": "T-001", "role": "tester", "verdict": "pass",
                   "summary": "Tests passed", "files_changed": ["test.py"],
                   "test_evidence": [{"type": "command_output", "command": "pytest", "result": "OK"}]}
-        # Use quick-like template that would get L0 but override to standard-dev
-        # Actually, use P2 + standard-dev with monkeypatch on determine_review_level
         import brain_manager as bm
         monkeypatch.setattr(bm, "determine_review_level", lambda t: "L0")
         task = {"id": "T-001", "priority": "P2",
                 "workgroup": {"template": "standard-dev"},
                 "orchestration": {"iteration": 2, "history": []}}
         decision = sched.make_decision(report, task)
-        assert decision.action == "promote_to_review"
-        assert "docs" in decision.reason.lower()
+        assert decision.action == "dispatch_role"
+        assert decision.params["role"] == "test_review"
+
+
+# ──────────────────────────────────────────
+# V6.1 Tests: 8-role cross-check flow
+# ──────────────────────────────────────────
+
+class TestV61RoleCrossCheck:
+    """Tests for V6.1 8-role cross-check flow (code_review, test_review, architect_review repositioned)."""
+
+    def test_pl2_architect_pass_dispatches_architect_review(self):
+        """PL2: architect pass → architect_review (V6.1: review architecture before development)."""
+        import scheduler as sched
+        report = {
+            "task_id": "T-V61-001",
+            "role": "architect",
+            "verdict": "pass",
+            "summary": "Design complete",
+            "acceptance_plan": [{"step_id": "T1", "description": "test", "category": "e2e", "expected_result": "ok"}],
+        }
+        task = {
+            "id": "T-V61-001",
+            "priority": "P1",
+            "workgroup": {"template": "standard-dev"},
+            "orchestration": {"iteration": 1, "history": []},
+        }
+        decision = sched.make_decision(report, task)
+        assert decision.action == "dispatch_role"
+        assert decision.params["role"] == "architect_review"
+
+    def test_pl2_architect_review_pass_dispatches_developer(self):
+        """PL2: architect_review pass → developer."""
+        import scheduler as sched
+        report = {
+            "task_id": "T-V61-002",
+            "role": "architect_review",
+            "verdict": "pass",
+            "summary": "Architecture looks good",
+        }
+        task = {
+            "id": "T-V61-002",
+            "priority": "P1",
+            "workgroup": {"template": "standard-dev"},
+            "orchestration": {"iteration": 2, "history": [
+                {"role": "architect", "verdict": "pass"},
+            ]},
+        }
+        decision = sched.make_decision(report, task)
+        assert decision.action == "dispatch_role"
+        assert decision.params["role"] == "developer"
+
+    def test_pl2_architect_review_fail_dispatches_architect(self):
+        """PL2: architect_review fail → architect (send back to redesign)."""
+        import scheduler as sched
+        report = {
+            "task_id": "T-V61-003",
+            "role": "architect_review",
+            "verdict": "fail",
+            "summary": "Design has gaps",
+            "issues": ["Missing error handling design"],
+        }
+        task = {
+            "id": "T-V61-003",
+            "priority": "P1",
+            "workgroup": {"template": "standard-dev"},
+            "orchestration": {"iteration": 2, "history": [
+                {"role": "architect", "verdict": "pass"},
+            ]},
+        }
+        decision = sched.make_decision(report, task)
+        assert decision.action == "dispatch_role"
+        assert decision.params["role"] == "architect"
+
+    def test_pl2_code_review_pass_dispatches_tester(self):
+        """PL2: code_review pass → tester."""
+        import scheduler as sched
+        report = {
+            "task_id": "T-V61-004",
+            "role": "code_review",
+            "verdict": "pass",
+            "summary": "Code matches design, tests adequate",
+        }
+        task = {
+            "id": "T-V61-004",
+            "priority": "P1",
+            "workgroup": {"template": "standard-dev"},
+            "orchestration": {"iteration": 3, "history": [
+                {"role": "architect", "verdict": "pass"},
+                {"role": "architect_review", "verdict": "pass"},
+                {"role": "developer", "verdict": "pass"},
+            ]},
+        }
+        decision = sched.make_decision(report, task)
+        assert decision.action == "dispatch_role"
+        assert decision.params["role"] == "tester"
+
+    def test_pl2_code_review_fail_dispatches_developer(self):
+        """PL2: code_review fail → developer (D11: check role fail sends back to execution role)."""
+        import scheduler as sched
+        report = {
+            "task_id": "T-V61-005",
+            "role": "code_review",
+            "verdict": "fail",
+            "summary": "Unit tests insufficient",
+            "issues": ["Missing edge case tests"],
+        }
+        task = {
+            "id": "T-V61-005",
+            "priority": "P1",
+            "workgroup": {"template": "standard-dev"},
+            "orchestration": {"iteration": 3, "history": [
+                {"role": "architect", "verdict": "pass"},
+                {"role": "architect_review", "verdict": "pass"},
+                {"role": "developer", "verdict": "pass"},
+            ]},
+        }
+        decision = sched.make_decision(report, task)
+        assert decision.action == "dispatch_role"
+        assert decision.params["role"] == "developer"
+
+    def test_pl2_test_review_pass_dispatches_retrospective(self):
+        """PL2: test_review pass → retrospective."""
+        import scheduler as sched
+        report = {
+            "task_id": "T-V61-006",
+            "role": "test_review",
+            "verdict": "pass",
+            "summary": "Tests are thorough and evidence is credible",
+        }
+        task = {
+            "id": "T-V61-006",
+            "priority": "P1",
+            "workgroup": {"template": "standard-dev"},
+            "orchestration": {"iteration": 5, "history": [
+                {"role": "architect", "verdict": "pass"},
+                {"role": "architect_review", "verdict": "pass"},
+                {"role": "developer", "verdict": "pass"},
+                {"role": "code_review", "verdict": "pass"},
+                {"role": "tester", "verdict": "pass"},
+            ]},
+        }
+        decision = sched.make_decision(report, task)
+        assert decision.action == "dispatch_role"
+        assert decision.params["role"] == "retrospective"
+
+    def test_pl2_test_review_fail_dispatches_tester(self):
+        """PL2: test_review fail → tester (D11: check role fail sends back to execution role)."""
+        import scheduler as sched
+        report = {
+            "task_id": "T-V61-007",
+            "role": "test_review",
+            "verdict": "fail",
+            "summary": "E2E tests are mocked, not real",
+            "issues": ["Tests use mock instead of real service"],
+        }
+        task = {
+            "id": "T-V61-007",
+            "priority": "P1",
+            "workgroup": {"template": "standard-dev"},
+            "orchestration": {"iteration": 5, "history": [
+                {"role": "architect", "verdict": "pass"},
+                {"role": "architect_review", "verdict": "pass"},
+                {"role": "developer", "verdict": "pass"},
+                {"role": "code_review", "verdict": "pass"},
+                {"role": "tester", "verdict": "pass"},
+            ]},
+        }
+        decision = sched.make_decision(report, task)
+        assert decision.action == "dispatch_role"
+        assert decision.params["role"] == "tester"
+
+    def test_pl3_test_review_pass_dispatches_auditor(self):
+        """PL3: test_review pass → auditor (not retrospective like PL2)."""
+        import scheduler as sched
+        report = {
+            "task_id": "T-V61-008",
+            "role": "test_review",
+            "verdict": "pass",
+            "summary": "Tests are thorough",
+        }
+        task = {
+            "id": "T-V61-008",
+            "priority": "P0",
+            "workgroup": {"template": "standard-dev"},
+            "orchestration": {"iteration": 6, "history": [
+                {"role": "architect", "verdict": "pass"},
+                {"role": "architect_review", "verdict": "pass"},
+                {"role": "developer", "verdict": "pass"},
+                {"role": "code_review", "verdict": "pass"},
+                {"role": "tester", "verdict": "pass"},
+            ]},
+        }
+        decision = sched.make_decision(report, task)
+        assert decision.action == "dispatch_role"
+        assert decision.params["role"] == "auditor"
+
+    def test_valid_roles_has_8_roles(self):
+        """V6.1: VALID_ROLES should have 8 roles."""
+        import scheduler as sched
+        assert len(sched.VALID_ROLES) == 8
+        assert "code_review" in sched.VALID_ROLES
+        assert "test_review" in sched.VALID_ROLES
+
+    def test_flow_transitions_count(self):
+        """V6.1: FLOW_TRANSITIONS should have 34 entries (PL0:2 + PL1:2 + PL2:14 + PL3:16)."""
+        import scheduler as sched
+        assert len(sched.FLOW_TRANSITIONS) == 34
+        # Count per PL
+        pl_counts = {}
+        for (pl, _, _) in sched.FLOW_TRANSITIONS:
+            pl_counts[pl] = pl_counts.get(pl, 0) + 1
+        assert pl_counts["PL0"] == 2
+        assert pl_counts["PL1"] == 2
+        assert pl_counts["PL2"] == 14
+        assert pl_counts["PL3"] == 16
+
+    def test_expected_flow_pl2(self):
+        """V6.1: PL2 expected flow includes all 7 roles."""
+        import scheduler as sched
+        flow = sched._get_expected_flow("PL2")
+        assert flow == ["architect", "architect_review", "developer", "code_review",
+                        "tester", "test_review", "retrospective"]
+
+    def test_expected_flow_pl3(self):
+        """V6.1: PL3 expected flow includes all 8 roles."""
+        import scheduler as sched
+        flow = sched._get_expected_flow("PL3")
+        assert flow == ["architect", "architect_review", "developer", "code_review",
+                        "tester", "test_review", "auditor", "retrospective"]
+
+
+class TestAssertAuditCompleted:
+    """Tests for _assert_audit_completed pre-condition assertion (D34)."""
+
+    def test_pl0_no_audit_required(self):
+        """PL0: no audit required, should not raise."""
+        import scheduler as sched
+        task = {"id": "T-001", "priority": "P2", "workgroup": {"template": "quick"},
+                "orchestration": {"history": []}}
+        sched._assert_audit_completed(task)  # should not raise
+
+    def test_pl1_no_audit_required(self):
+        """PL1: no audit required, should not raise."""
+        import scheduler as sched
+        task = {"id": "T-001", "priority": "P2", "workgroup": {"template": "standard-dev"},
+                "title": "文档整理", "description": "整理项目文档",
+                "orchestration": {"history": []}}
+        assert sched.determine_process_level(task) == "PL1"
+        sched._assert_audit_completed(task)  # should not raise
+
+    def test_pl2_retrospective_passed(self):
+        """PL2: retrospective passed → should not raise."""
+        import scheduler as sched
+        task = {"id": "T-001", "priority": "P1", "workgroup": {"template": "standard-dev"},
+                "orchestration": {"history": [
+                    {"role": "retrospective", "verdict": "pass"},
+                ]}}
+        sched._assert_audit_completed(task)  # should not raise
+
+    def test_pl2_no_retrospective_raises(self):
+        """PL2: no retrospective → should raise ValueError."""
+        import scheduler as sched
+        task = {"id": "T-001", "priority": "P1", "workgroup": {"template": "standard-dev"},
+                "orchestration": {"history": [
+                    {"role": "tester", "verdict": "pass"},
+                ]}}
+        with pytest.raises(ValueError, match="retrospective"):
+            sched._assert_audit_completed(task)
+
+    def test_pl3_auditor_passed(self):
+        """PL3: auditor passed → should not raise."""
+        import scheduler as sched
+        task = {"id": "T-001", "priority": "P0", "workgroup": {"template": "standard-dev"},
+                "orchestration": {"history": [
+                    {"role": "auditor", "verdict": "pass"},
+                ]}}
+        sched._assert_audit_completed(task)  # should not raise
+
+    def test_pl3_no_auditor_raises(self):
+        """PL3: no auditor → should raise ValueError."""
+        import scheduler as sched
+        task = {"id": "T-001", "priority": "P0", "workgroup": {"template": "standard-dev"},
+                "orchestration": {"history": [
+                    {"role": "retrospective", "verdict": "pass"},
+                ]}}
+        with pytest.raises(ValueError, match="auditor"):
+            sched._assert_audit_completed(task)
+
+
+class TestV61PromptGeneration:
+    """Tests for V6.1 prompt generation (code_review, test_review guidance)."""
+
+    def test_code_review_guidance_in_prompt(self):
+        """code_review role should have specific guidance in prompt."""
+        import scheduler as sched
+        task = {"id": "T-001", "priority": "P1", "workgroup": {"template": "standard-dev"},
+                "title": "Test task", "description": "Test"}
+        prompt = sched.generate_worker_prompt_v2(task, "code_review")
+        assert "Code Review" in prompt
+        assert "架构一致性" in prompt
+        assert "测试覆盖" in prompt
+
+    def test_test_review_guidance_in_prompt(self):
+        """test_review role should have specific guidance in prompt."""
+        import scheduler as sched
+        task = {"id": "T-001", "priority": "P1", "workgroup": {"template": "standard-dev"},
+                "title": "Test task", "description": "Test"}
+        prompt = sched.generate_worker_prompt_v2(task, "test_review")
+        assert "Test Review" in prompt
+        assert "测试真实性" in prompt
+        assert "测试盲区" in prompt
+
+    def test_code_review_emoji(self):
+        """code_review should have 🔎 emoji in spawn instruction."""
+        import scheduler as sched
+        task = {"id": "T-001", "priority": "P1", "workgroup": {"template": "standard-dev"},
+                "title": "Test task", "description": "Test"}
+        instruction = sched.generate_spawn_instruction_v2(task, "code_review")
+        assert "🔎" in instruction["title"]
+
+    def test_test_review_emoji(self):
+        """test_review should have 📝 emoji in spawn instruction."""
+        import scheduler as sched
+        task = {"id": "T-001", "priority": "P1", "workgroup": {"template": "standard-dev"},
+                "title": "Test task", "description": "Test"}
+        instruction = sched.generate_spawn_instruction_v2(task, "test_review")
+        assert "📝" in instruction["title"]
+
+    def test_auditor_guidance_has_session_jsonl(self):
+        """Auditor guidance should mention dispatcher session log when session ID is available."""
+        import scheduler as sched
+        task = {"id": "T-001", "priority": "P0", "workgroup": {"template": "standard-dev"},
+                "title": "Test", "description": "Test",
+                "orchestration": {"dispatcher_session_id": "test-session-123", "history": []}}
+        prompt = sched.generate_worker_prompt_v2(task, "auditor")
+        assert "test-session-123" in prompt
+        assert "jsonl" in prompt.lower()

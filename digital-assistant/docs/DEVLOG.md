@@ -617,3 +617,37 @@ Cross Check 系统整改 Phase 1 三项最高风险整改：
 ### 测试结果
 - `test_scheduler_notify.py`: 19 passed（通知相关，含 validate_notification 集成）
 - 全量回归: 709 passed, 3 failed（3 个失败为 pre-existing rule_loader/rule_injection 测试，与本变更无关）
+
+## Phase 4: V6.1 角色互检 + 流程模板重构 (2026-04-04)
+
+**目标**: 实现 8 角色互检体系，消除角色歧义，增强测试审查和审计能力
+
+### 核心改动
+- [x] VALID_ROLES 6→8（新增 code_review, test_review）
+- [x] FLOW_TRANSITIONS 重写：PL2 8→14 条, PL3 12→16 条
+- [x] PL2 流程：architect→architect_review→developer→code_review→tester→test_review→retrospective
+- [x] PL3 流程：同上 + auditor（test_review→auditor→retrospective）
+- [x] _build_handoff_context：12 个角色对分支覆盖所有 V6.1 转移
+- [x] 新增 _assert_audit_completed() mark_done 前置条件断言（D34）
+- [x] 新增 _generate_code_review_guidance() / _generate_test_review_guidance()
+- [x] 新增 roles/code_review.md / roles/test_review.md
+- [x] 增强 auditor/retrospective guidance：注入 dispatcher session jsonl 路径（D31）
+- [x] 删除 _evaluate_dispatcher_advice + _record_concern（~75 行, D27）
+- [x] 测试用例同步更新：11 个旧测试修复 + 23 个新 V6.1 测试
+- [x] PL0/PL1 不变（向后兼容）
+
+### 关键设计决策
+- D29: architect_review（开发前评审架构）和 code_review（开发后检查代码+测试覆盖）是两个不同角色
+- D30: test_review 只做语义审查（真实性/盲区/深度），不重新执行测试
+- D27: _audit_gate() 不再阻塞，改为仅告警；dispatcher 不做语义判断
+- D34: _assert_audit_completed() 是 mark_done 前置条件断言
+- D11: check 角色 fail 打回对应执行角色（code_review fail→developer, test_review fail→tester）
+
+### 测试结果
+- 209 passed, 1 failed（pre-existing: test_parse_multiple_reports_takes_newest）
+- 新增测试：TestV61RoleCrossCheck(12), TestAssertAuditCompleted(6), TestV61PromptGeneration(5) = 23 个
+
+### 设计文档
+- [phase4-architecture-v6.md](../../data/brain/designs/phase4-architecture-v6.md)
+- [phase4-design-detail-v6.md](../../data/brain/designs/phase4-design-detail-v6.md)
+- [phase4-final-v6.md](../../data/brain/designs/phase4-final-v6.md)

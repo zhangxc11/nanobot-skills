@@ -82,14 +82,14 @@ FEISHU_NOTIFY_RECIPIENT = "ou_2fba93da1d059fd2520c2f385743f175"
 REPORT_SCHEMA = {
     "required": ["task_id", "role", "verdict", "summary"],
     "optional": ["issues", "files_changed"],
-    "valid_roles": ["developer", "tester", "architect", "auditor", "architect_review", "retrospective"],
+    "valid_roles": ["developer", "tester", "architect", "auditor", "architect_review", "code_review", "test_review", "retrospective"],
     "valid_verdicts": ["pass", "fail", "blocked", "partial"],
 }
 
 # ── Phase 2: Retrospective & Auditor constants ──
 MAX_RETRO_RETRY = 1  # Max times retrospective can trigger a re-route before force-passing
 BRAIN_DIR = WORKSPACE / "data" / "brain"
-VALID_ROLES = frozenset({"developer", "tester", "architect", "auditor", "architect_review", "retrospective"})
+VALID_ROLES = frozenset({"developer", "tester", "architect", "auditor", "architect_review", "code_review", "test_review", "retrospective"})
 
 # ──────────────────────────────────────────
 # Verification requirements by task category
@@ -488,29 +488,41 @@ FLOW_TRANSITIONS = {
     ("PL1", "developer", "pass"):  ("done",),
     ("PL1", "developer", "fail"):  ("retry", "developer"),
 
-    # PL2: architect → developer → tester → retrospective → done/review
-    ("PL2", "architect", "pass"):        ("role", "developer"),
-    ("PL2", "architect", "fail"):        ("blocked",),
-    ("PL2", "developer", "pass"):        ("role", "tester"),
-    ("PL2", "developer", "fail"):        ("retry", "developer"),
-    ("PL2", "tester", "pass"):           ("role", "retrospective"),      # CHANGED: was review_check
-    ("PL2", "tester", "fail"):           ("role", "developer"),
-    ("PL2", "retrospective", "pass"):    ("review_check",),              # NEW: retrospective pass → review_check
-    ("PL2", "retrospective", "fail"):    ("retro_route",),               # NEW: retrospective found missing steps
+    # PL2: architect → architect_review → developer → code_review → tester → test_review → retrospective → done/review
+    # V6.1: 新增 architect_review(开发前评审架构)、code_review(开发后检查代码+测试覆盖)、test_review(测试后语义审查)
+    ("PL2", "architect", "pass"):           ("role", "architect_review"),   # architect → architect_review (V6.1: 开发前评审架构)
+    ("PL2", "architect", "fail"):           ("blocked",),
+    ("PL2", "architect_review", "pass"):    ("role", "developer"),          # architect_review pass → developer
+    ("PL2", "architect_review", "fail"):    ("role", "architect"),          # architect_review fail → 打回 architect
+    ("PL2", "developer", "pass"):           ("role", "code_review"),        # developer → code_review (V6.1: 代码+测试覆盖检查)
+    ("PL2", "developer", "fail"):           ("retry", "developer"),
+    ("PL2", "code_review", "pass"):         ("role", "tester"),             # code_review pass → tester
+    ("PL2", "code_review", "fail"):         ("role", "developer"),          # code_review fail → 打回 developer (D11)
+    ("PL2", "tester", "pass"):              ("role", "test_review"),        # tester → test_review (V6.1: 测试语义审查)
+    ("PL2", "tester", "fail"):              ("role", "developer"),
+    ("PL2", "test_review", "pass"):         ("role", "retrospective"),      # test_review pass → retrospective
+    ("PL2", "test_review", "fail"):         ("role", "tester"),             # test_review fail → 打回 tester (D11)
+    ("PL2", "retrospective", "pass"):       ("review_check",),
+    ("PL2", "retrospective", "fail"):       ("retro_route",),
 
-    # PL3: architect → developer → architect_review → tester → auditor → retrospective → review (mandatory)
-    ("PL3", "architect", "pass"):          ("role", "developer"),
-    ("PL3", "architect", "fail"):          ("blocked",),
-    ("PL3", "developer", "pass"):          ("role", "architect_review"),  # CHANGED: was tester
-    ("PL3", "developer", "fail"):          ("retry", "developer"),
-    ("PL3", "architect_review", "pass"):   ("role", "tester"),            # NEW: code review pass → tester
-    ("PL3", "architect_review", "fail"):   ("role", "developer"),         # NEW: code review fail → developer
-    ("PL3", "tester", "pass"):             ("role", "auditor"),           # CHANGED: was review
-    ("PL3", "tester", "fail"):             ("role", "developer"),
-    ("PL3", "auditor", "pass"):            ("role", "retrospective"),     # NEW: auditor pass → retrospective
-    ("PL3", "auditor", "fail"):            ("auditor_route",),            # NEW: auditor fail → route decision
-    ("PL3", "retrospective", "pass"):      ("review",),                   # NEW: retrospective pass → review
-    ("PL3", "retrospective", "fail"):      ("retro_route",),              # NEW: retrospective found missing steps
+    # PL3: architect → architect_review → developer → code_review → tester → test_review → auditor → retrospective → review
+    # V6.1: architect_review 移到 developer 前, 新增 code_review 在 developer 后, 新增 test_review 在 tester 后
+    ("PL3", "architect", "pass"):           ("role", "architect_review"),    # architect → architect_review (V6.1)
+    ("PL3", "architect", "fail"):           ("blocked",),
+    ("PL3", "architect_review", "pass"):    ("role", "developer"),           # architect_review pass → developer
+    ("PL3", "architect_review", "fail"):    ("role", "architect"),           # architect_review fail → 打回 architect
+    ("PL3", "developer", "pass"):           ("role", "code_review"),         # developer → code_review (V6.1)
+    ("PL3", "developer", "fail"):           ("retry", "developer"),
+    ("PL3", "code_review", "pass"):         ("role", "tester"),              # code_review pass → tester
+    ("PL3", "code_review", "fail"):         ("role", "developer"),           # code_review fail → 打回 developer
+    ("PL3", "tester", "pass"):              ("role", "test_review"),         # tester → test_review (V6.1)
+    ("PL3", "tester", "fail"):              ("role", "developer"),
+    ("PL3", "test_review", "pass"):         ("role", "auditor"),             # test_review pass → auditor (PL3)
+    ("PL3", "test_review", "fail"):         ("role", "tester"),              # test_review fail → 打回 tester
+    ("PL3", "auditor", "pass"):             ("role", "retrospective"),
+    ("PL3", "auditor", "fail"):             ("auditor_route",),
+    ("PL3", "retrospective", "pass"):       ("review",),
+    ("PL3", "retrospective", "fail"):       ("retro_route",),
 }
 
 
@@ -881,69 +893,9 @@ def _count_retro_retries(task: dict) -> int:
 # Phase 2: Dispatcher advice (LLM suggestion layer)
 # ──────────────────────────────────────────
 
-def _evaluate_dispatcher_advice(task: dict, report: dict, role: str,
-                                verdict: str, pl: str,
-                                advice: dict) -> Decision | None:
-    """Evaluate dispatcher's judgment and decide whether to override.
 
-    Rules:
-    - advice.verdict == "fail" → 打回（信任 Dispatcher 的判断）
-    - advice.verdict == "concern" → 记录但不打回（留给后续环节处理）
-    - advice.verdict == "pass" or None → 不干预
-    - PL0/PL1: 不参与
-
-    Args:
-        task: Task dict
-        report: Worker report
-        role: Current worker role
-        verdict: Worker verdict
-        pl: Process level
-        advice: Dispatcher advice dict with keys: verdict, reason, concerns, suggested_target
-
-    Returns:
-        Decision if override needed, None otherwise
-    """
-    if pl in ("PL0", "PL1"):
-        return None
-
-    advice_verdict = advice.get("verdict")
-
-    if advice_verdict == "fail":
-        target = advice.get("suggested_target") or role
-        if target not in VALID_ROLES:
-            target = role  # fallback to current role
-        concerns = advice.get("concerns", [])
-        concern_text = "\n".join(f"- {c}" for c in concerns) if concerns else ""
-        reason_text = advice.get("reason", "")
-        context = f"⚠️ Dispatcher 审查发现问题:\n{reason_text}"
-        if concern_text:
-            context += f"\n\n具体关注点:\n{concern_text}"
-        return Decision(
-            action="dispatch_role",
-            params={"role": target, "context": context},
-            reason=f"dispatcher advice: fail — {reason_text}"
-        )
-
-    if advice_verdict == "concern":
-        _record_concern(task, advice)
-        return None  # concern → 不干预当前决策
-
-    return None  # pass or unrecognized → 不干预
-
-
-def _record_concern(task: dict, advice: dict):
-    """Record dispatcher concern to task orchestration for later reference."""
-    orch = task.setdefault("orchestration", {})
-    concerns = orch.setdefault("concerns", [])
-    concerns.append({
-        "timestamp": bm.now_iso(),
-        "reason": advice.get("reason", ""),
-        "concerns": advice.get("concerns", []),
-    })
-    try:
-        bm.save_task(task)
-    except Exception:
-        pass  # best-effort
+# [V6.1] _evaluate_dispatcher_advice and _record_concern removed (D27: dispatcher 不做语义判断)
+# Audit is now handled by auditor worker reading dispatcher session jsonl.
 
 
 def _generate_default_acceptance_plan(task: dict, level: str = "standard") -> list:
@@ -1246,6 +1198,8 @@ _DEFAULT_ROLE_ITERATIONS = {
     "architect": 25,
     "auditor": 20,
     "architect_review": 20,
+    "code_review": 20,
+    "test_review": 20,
     "retrospective": 15,
 }
 
@@ -1553,6 +1507,49 @@ def _is_code_task(task: dict) -> bool:
     return category != "doc_only"
 
 
+def _assert_audit_completed(task: dict) -> None:
+    """Pre-condition assertion: audit step must have been executed before mark_done.
+
+    For PL2: retrospective must have passed (retrospective serves as audit).
+    For PL3: auditor must have passed.
+    PL0/PL1: no audit required.
+
+    This is a data-existence check (like a DB CHECK constraint), not a semantic
+    judgment. It does not violate cross-check principles (D34).
+
+    Raises:
+        ValueError: if required audit step was not completed
+    """
+    pl = determine_process_level(task)
+    if pl in ("PL0", "PL1"):
+        return  # No audit required
+
+    history = task.get("orchestration", {}).get("history", [])
+
+    if pl == "PL2":
+        # retrospective serves as audit in PL2
+        retro_passed = any(
+            h.get("role") == "retrospective" and h.get("verdict") == "pass"
+            for h in history
+        )
+        if not retro_passed:
+            raise ValueError(
+                f"PL2 task {task.get('id')} cannot be marked done: "
+                f"retrospective (audit) not completed"
+            )
+
+    elif pl == "PL3":
+        auditor_passed = any(
+            h.get("role") == "auditor" and h.get("verdict") == "pass"
+            for h in history
+        )
+        if not auditor_passed:
+            raise ValueError(
+                f"PL3 task {task.get('id')} cannot be marked done: "
+                f"auditor not completed"
+            )
+
+
 def _run_gate_checks(task: dict, report: dict, role: str, verdict: str, pl: str):
     """Run role-specific gate checks before state transition.
 
@@ -1741,8 +1738,26 @@ def _build_handoff_context(from_role: str, to_role: str, report: dict,
     """Build context string for role handoff transitions.
 
     Extracted from _execute_transition to keep it concise and testable.
+    V6.1: Updated for 8-role flow (architect_review before dev, code_review after dev, test_review after tester).
     """
-    if from_role == "architect" and to_role == "developer":
+    # ── architect → architect_review (V6.1: 开发前评审架构) ──
+    if from_role == "architect" and to_role == "architect_review":
+        design_notes = report.get("design_notes", report.get("summary", ""))
+        acceptance_plan = report.get("acceptance_plan", [])
+        # Store rule_context from architect report for later use by architect_review → developer handoff
+        rule_verdict = report.get("rule_verdict", {})
+        worker_instructions = rule_verdict.get("worker_instructions", "").strip() if rule_verdict else ""
+        task["rule_context"] = worker_instructions or rule_loader.collect_rules(task)
+        bm.save_task(task)
+        context = f"Architect has produced the design. Please review for completeness and feasibility.\n\nArchitect summary:\n{summary}"
+        if design_notes:
+            context += f"\n\n**Design Notes:**\n{design_notes}"
+        if acceptance_plan:
+            context += f"\n\n**Acceptance Plan ({len(acceptance_plan)} steps):**\n{json.dumps(acceptance_plan, ensure_ascii=False, indent=2)}"
+        return context
+
+    # ── architect → developer (kept for backward compat / direct path) ──
+    elif from_role == "architect" and to_role == "developer":
         rule_verdict = report.get("rule_verdict", {})
         worker_instructions = rule_verdict.get("worker_instructions", "").strip() if rule_verdict else ""
         if not worker_instructions:
@@ -1755,34 +1770,81 @@ def _build_handoff_context(from_role: str, to_role: str, report: dict,
             if design_notes:
                 context_parts.append(f"### Architect 设计要点\n\n{design_notes}")
             context = "\n\n".join(context_parts)
-        # Store rule_context
+        # Store rule_context for later use by architect_review → developer handoff
         task["rule_context"] = worker_instructions or rule_loader.collect_rules(task)
         bm.save_task(task)
         return context
+
+    # ── architect_review → developer (V6.1: 架构评审通过，进入开发) ──
+    elif from_role == "architect_review" and to_role == "developer":
+        # Retrieve stored architect context from task (saved during architect completion)
+        rule_context = task.get("rule_context", "")
+        review_notes = f"Architecture review passed:\n{summary}"
+        if rule_context:
+            return f"{rule_context}\n\n### Architecture Review Notes\n{review_notes}"
+        # Fallback: try to build context from architect report stored in task
+        return f"Architecture review passed. Proceed with implementation.\n\nReview summary:\n{summary}"
+
+    # ── architect_review → architect (V6.1: 架构评审失败，打回) ──
+    elif from_role == "architect_review" and to_role == "architect":
+        return f"Architecture review found issues:\n{summary}\n\nIssues: {json.dumps(report.get('issues', []), ensure_ascii=False)}"
+
+    # ── developer → code_review (V6.1: 代码+测试覆盖检查) ──
+    elif from_role == "developer" and to_role == "code_review":
+        dev_issues = report.get("issues", [])
+        context = f"Developer completed implementation. Please review for design consistency and test coverage.\n\nDeveloper summary:\n{summary}"
+        if dev_issues:
+            context += f"\n\n**Developer reported issues:**\n{json.dumps(dev_issues, ensure_ascii=False, indent=2)}"
+        return context
+
+    # ── developer → tester (kept for backward compat) ──
     elif from_role == "developer" and to_role == "tester":
         dev_issues = report.get("issues", [])
         context = f"Developer completed:\n{summary}"
         if dev_issues:
             context += f"\n\n**Developer reported issues (请审查):**\n{json.dumps(dev_issues, ensure_ascii=False, indent=2)}"
         return context
-    elif from_role == "developer" and to_role == "architect_review":
-        dev_issues = report.get("issues", [])
-        context = f"Developer completed implementation. Please review for design consistency.\n\nDeveloper summary:\n{summary}"
-        if dev_issues:
-            context += f"\n\n**Developer reported issues:**\n{json.dumps(dev_issues, ensure_ascii=False, indent=2)}"
+
+    # ── code_review → tester (V6.1: 代码审查通过) ──
+    elif from_role == "code_review" and to_role == "tester":
+        return f"Code review passed:\n{summary}"
+
+    # ── code_review → developer (V6.1: 代码审查失败，打回 developer) ──
+    elif from_role == "code_review" and to_role == "developer":
+        return f"Code review found issues:\n{summary}\n\nIssues: {json.dumps(report.get('issues', []), ensure_ascii=False)}"
+
+    # ── tester → test_review (V6.1: 测试语义审查) ──
+    elif from_role == "tester" and to_role == "test_review":
+        test_evidence = report.get("test_evidence", report.get("test_results", []))
+        context = f"Tester completed testing. Please review the test process and report quality.\n\nTester summary:\n{summary}"
+        if test_evidence:
+            context += f"\n\n**Test Evidence:**\n{json.dumps(test_evidence, ensure_ascii=False, indent=2)}"
         return context
-    elif from_role == "architect_review" and to_role == "tester":
-        return f"Architect code review passed:\n{summary}"
-    elif from_role == "architect_review" and to_role == "developer":
-        return f"Architect code review found issues:\n{summary}\n\nIssues: {json.dumps(report.get('issues', []))}"
+
+    # ── tester → developer (test fail → developer fix) ──
     elif from_role == "tester" and to_role == "developer":
-        return f"Tester found issues:\n{summary}\n\nIssues: {json.dumps(report.get('issues', []))}"
+        return f"Tester found issues:\n{summary}\n\nIssues: {json.dumps(report.get('issues', []), ensure_ascii=False)}"
+
+    # ── test_review → retrospective (PL2: 测试审查通过 → 复盘) ──
+    elif from_role == "test_review" and to_role == "retrospective":
+        return f"Test review passed. Please review the orchestration flow completeness.\n\nTest review summary:\n{summary}"
+
+    # ── test_review → auditor (PL3: 测试审查通过 → 审计) ──
+    elif from_role == "test_review" and to_role == "auditor":
+        return f"Test review passed. Please audit the full orchestration flow.\n\nTest review summary:\n{summary}"
+
+    # ── test_review → tester (V6.1: 测试审查失败，打回 tester) ──
+    elif from_role == "test_review" and to_role == "tester":
+        return f"Test review found issues with the testing:\n{summary}\n\nIssues: {json.dumps(report.get('issues', []), ensure_ascii=False)}"
+
+    # ── tester → auditor (kept for backward compat) ──
     elif from_role == "tester" and to_role == "auditor":
         return f"Tester passed. Please audit the full orchestration flow.\n\nTester summary:\n{summary}"
-    elif from_role == "tester" and to_role == "retrospective":
-        return f"Tester passed. Please review the orchestration flow completeness.\n\nTester summary:\n{summary}"
+
+    # ── auditor → retrospective ──
     elif from_role == "auditor" and to_role == "retrospective":
         return f"Auditor passed. Please perform final flow retrospective.\n\nAuditor summary:\n{summary}"
+
     else:
         return summary
 
@@ -1796,6 +1858,7 @@ def _execute_transition(task: dict, report: dict, transition: tuple, pl: str,
     history = task.get("orchestration", {}).get("history", [])
 
     if action_type == "done":
+        _assert_audit_completed(task)  # Pre-condition assertion (D34)
         return Decision(action="mark_done", reason=f"{pl} flow complete — {role} passed")
 
     elif action_type == "role":
@@ -1849,6 +1912,7 @@ def _execute_transition(task: dict, report: dict, transition: tuple, pl: str,
                     params={"summary": f"⚠️ tester passed but docs incomplete ({', '.join(doc_missing)}). {summary}"},
                     reason=f"tester passed but docs missing {doc_missing}, upgrading to manual review"
                 )
+            _assert_audit_completed(task)  # Pre-condition assertion (D34)
             return Decision(
                 action="mark_done",
                 reason=f"tester passed, docs verified, review level {review_level}"
@@ -1902,16 +1966,13 @@ def _handle_auditor_route(task: dict, report: dict, pl: str,
     - architect: test gaps → 补测试方案 → 然后 tester 补测执行
     - tester: test execution gaps (plan exists but not executed properly)
 
-    Uses dispatcher_advice.suggested_target if available,
-    otherwise report.suggested_target, otherwise defaults to developer.
+    Uses report.suggested_target, otherwise defaults to developer.
+    [V6.1] dispatcher_advice parameter kept for backward compat but no longer used.
     """
     target = "developer"  # safe default
 
-    # Dispatcher 判断优先
-    if dispatcher_advice and dispatcher_advice.get("suggested_target"):
-        target = dispatcher_advice["suggested_target"]
-    # 报告中的 suggested_target 作为备选
-    elif report.get("suggested_target"):
+    # 报告中的 suggested_target
+    if report.get("suggested_target"):
         target = report["suggested_target"]
 
     # Validate target
@@ -2139,14 +2200,8 @@ def make_decision(report: dict | None, task: dict,
         if gate_result is not None:
             return gate_result
 
-        # Step 1.5 [Phase 2]: Dispatcher judgment (semantic layer)
-        # Only for PL2/PL3; dispatcher_advice is optional for backward compat
-        if dispatcher_advice and pl in ("PL2", "PL3"):
-            override = _evaluate_dispatcher_advice(
-                task, report, role, verdict, pl, dispatcher_advice
-            )
-            if override is not None:
-                return override
+        # [V6.1] Step 1.5 removed: dispatcher_advice/semantic judgment deleted (D27)
+        # Audit is now handled by auditor worker reading dispatcher session jsonl.
 
         # Step 2: Look up state transition table
         transition = FLOW_TRANSITIONS.get((pl, role, verdict))
@@ -2157,9 +2212,8 @@ def make_decision(report: dict | None, task: dict,
                 reason=f"no transition defined for ({pl}, {role}, {verdict})"
             )
 
-        # Step 3: Execute transition (pass dispatcher_advice for route decisions)
-        return _execute_transition(task, report, transition, pl,
-                                   dispatcher_advice=dispatcher_advice)
+        # Step 3: Execute transition
+        return _execute_transition(task, report, transition, pl)
 
     # ── Legacy if-else path (STATE_MACHINE_ENABLED=False) ──
     return _make_decision_legacy(report, task, role, verdict, summary, history)
@@ -3095,15 +3149,33 @@ def _generate_auditor_guidance(task: dict) -> str:
     2. Test quality: identify test deficiencies and gaps that Tester missed
 
     These are complementary to retrospective (which checks process-level issues).
+    [V6.1] Enhanced: inject dispatcher session jsonl path for flow verification (D31).
     """
     pl = determine_process_level(task)
     history = task.get("orchestration", {}).get("history", [])
     actual_flow = [h.get("role") for h in history]
 
+    # V6.1: Inject dispatcher session jsonl path for audit verification (D31)
+    session_jsonl_section = ""
+    dispatcher_session = task.get("orchestration", {}).get("dispatcher_session_id", "")
+    if dispatcher_session:
+        jsonl_path = Path.home() / ".nanobot" / "sessions" / f"{dispatcher_session}.jsonl"
+        session_jsonl_section = f"""
+
+### Dispatcher Session Log（用于检查流程执行）
+请读取此文件检查 dispatcher 的实际调度行为:
+`{jsonl_path}`
+
+使用 `read_file` 工具读取，关注：
+- spawn subagent 的记录（检查每个角色是否被正确调度）
+- 角色执行顺序是否符合模板定义
+- 打回后是否有修复+再确认
+"""
+
     return f"""### Your Mission (Auditor — Flow Auditor + Test Quality)
 
 你的职责是审计整个调度链路的合理性，**并检查测试质量**（发现测试缺陷/盲区）。
-
+{session_jsonl_section}
 ### 审计维度
 
 **A. 调度路径审计（Flow Audit）**
@@ -3120,10 +3192,11 @@ def _generate_auditor_guidance(task: dict) -> str:
 8. **证据可信度** — test_evidence 中的结果是否可复现、可验证？
 
 ### 不做什么
-- ❌ 不做代码风格审查（那是 architect_review 的事）
+- ❌ 不做代码风格审查（那是 code_review 的事）
 - ❌ 不重新运行测试（那是 Tester 的事）
 - ❌ 不评估设计方案好坏（那是 Plan Reviewer 的事）
 - ❌ 不检查流程跳步/环节缺失（那是 retrospective 的事）
+- ❌ 不重新评判已通过 test_review 的测试内容质量
 
 ### 输出要求
 - verdict: pass / fail
@@ -3136,26 +3209,87 @@ def _generate_auditor_guidance(task: dict) -> str:
 
 
 def _generate_architect_review_guidance(task: dict) -> str:
-    """Generate guidance for architect in code review mode (PL3 only)."""
-    return """### Your Mission (Architect — Code Review)
+    """Generate guidance for architect_review role (architecture review before development)."""
+    return """### Your Mission (Architect Review — 架构评审)
 
-你的职责是检查 Developer 的实现是否与设计方案一致，**不是重新做设计**。
+你的职责是评审 Architect 的设计方案是否完整、可行，**在开发开始之前**确认架构质量。
 
 ### 审查维度
-1. **设计一致性** — 实现是否偏离了设计方案？有无遗漏的设计要求？
-2. **接口契约** — 函数签名、返回类型、异常处理是否与设计一致？
-3. **边界条件** — 设计中提到的边界情况是否都处理了？
-4. **向后兼容** — 改动是否破坏了现有功能？
-5. **文档同步** — ARCHITECTURE.md / DEVLOG.md 是否与代码同步？
+1. **架构完整性** — 设计方案是否覆盖了所有需求？有无遗漏的场景？
+2. **技术可行性** — 方案是否在当前技术栈和约束下可实现？
+3. **评测方案可行性** — acceptance_plan 是否覆盖关键验证场景？
+4. **风险评估** — 是否识别了关键风险并有缓解措施？
+5. **向后兼容** — 方案是否考虑了对现有系统的影响？
 
 ### 不做什么
-- ❌ 不重新设计方案
-- ❌ 不做测试执行
-- ❌ 不做代码风格审查（只看设计一致性）
+- ❌ 不重新设计方案（那是 architect 的事）
+- ❌ 不做代码实现（那是 developer 的事）
+- ❌ 不做测试执行（那是 tester 的事）
 
 ### 输出
 - verdict: pass / fail
-- 如果 fail，列出具体的不一致之处
+- 如果 fail，列出具体的架构问题（会打回 architect 修改）
+"""
+
+
+def _generate_code_review_guidance(task: dict) -> str:
+    """Generate guidance for code_review role (code + test coverage review after development).
+
+    V6.1 新角色：检查代码架构一致性 + developer 单元测试覆盖和合理性。
+    """
+    return """### Your Mission (Code Review — 代码审查)
+
+你的职责是检查 Developer 的代码实现和单元测试质量，**不是重新做设计或执行测试**。
+
+### 审查维度
+1. **架构一致性** — 代码实现是否符合 Architect 的设计方案？有无偏离设计的地方？
+2. **接口契约** — 函数签名、返回类型、数据结构是否与设计一致？
+3. **测试覆盖** — Developer 是否编写了充分的单元测试？
+4. **测试合理性** — 单元测试是否覆盖了关键路径和边界情况？
+   - 关键路径：核心业务逻辑是否有对应测试？
+   - 边界情况：空值、极端值、错误输入是否覆盖？
+   - 测试质量：测试是否真正验证了行为（不是只检查不报错）？
+5. **代码质量** — 可读性、错误处理、边界条件处理
+
+### 不做什么
+- ❌ 不重新设计方案（那是 architect 的事）
+- ❌ 不执行测试（那是 tester 的事）
+- ❌ 不检查流程合规性（那是 auditor 的事）
+- ❌ 不做代码风格审查（只看设计一致性和功能正确性）
+
+### 输出
+- verdict: pass — 代码符合设计，测试覆盖充分
+- verdict: fail — 发现需要 Developer 修复的问题（会打回 developer）
+  - 在 issues 中列出具体问题
+"""
+
+
+def _generate_test_review_guidance(task: dict) -> str:
+    """Generate guidance for test_review role (semantic review of test process and report).
+
+    V6.1 新角色：基于语义的测试过程和测试报告审查。
+    """
+    return """### Your Mission (Test Review — 测试审查)
+
+你的职责是审查 Tester 的测试过程和报告质量，**不是重新执行测试**。
+
+### 审查维度
+1. **测试真实性** — E2E 测试是否真正端到端执行？（非 mock/模拟代替真实执行）
+2. **测试盲区** — 是否遗漏了边界情况、异常路径、并发场景？
+3. **测试深度** — 不仅 happy path，还有 error path 和 edge case？
+4. **证据可信度** — 测试输出是否可复现、可验证？证据是否充分？
+5. **报告完整性** — test_evidence 是否完整记录了测试过程和结果？
+
+### 不做什么
+- ❌ 不重新执行测试（那是 tester 的事）
+- ❌ 不审查代码（那是 code_review 的事）
+- ❌ 不检查流程合规性（那是 auditor 的事）
+- ❌ 不重新评判已通过的代码审查结论
+
+### 输出
+- verdict: pass — 测试过程严谨、覆盖充分、证据可信
+- verdict: fail — 发现测试不足（会打回 tester 补充测试）
+  - 在 issues 中列出具体的测试不足之处
 """
 
 
@@ -3165,6 +3299,7 @@ def _generate_retrospective_guidance(task: dict) -> str:
     Retrospective checks for process-level issues:
     - Missing steps, skipped roles, bypassed gates
     - Complementary to Auditor (which checks test quality + flow audit)
+    [V6.1] Enhanced: inject dispatcher session jsonl path for flow verification (D31).
     """
     pl = determine_process_level(task)
     history = task.get("orchestration", {}).get("history", [])
@@ -3173,10 +3308,23 @@ def _generate_retrospective_guidance(task: dict) -> str:
     expected_flow = _get_expected_flow(pl)
     actual_flow = [h.get("role") for h in history]
 
+    # V6.1: Inject dispatcher session jsonl path for audit verification (D31)
+    session_jsonl_section = ""
+    dispatcher_session = task.get("orchestration", {}).get("dispatcher_session_id", "")
+    if dispatcher_session:
+        jsonl_path = Path.home() / ".nanobot" / "sessions" / f"{dispatcher_session}.jsonl"
+        session_jsonl_section = f"""
+### Dispatcher Session Log（用于检查流程执行）
+请读取此文件检查 dispatcher 的实际调度行为:
+`{jsonl_path}`
+
+使用 `read_file` 工具读取，关注 spawn subagent 的记录。
+"""
+
     return f"""### Your Mission (Retrospective — 流程复盘)
 
 你的职责是复盘整个调度流程的**完整性和规范性**，检查是否有环节被跳过或缺失。
-
+{session_jsonl_section}
 ### 流程信息
 - **流程级别**: {pl}
 - **应有流程**: {expected_flow}
@@ -3191,7 +3339,7 @@ def _generate_retrospective_guidance(task: dict) -> str:
 
 ### 不做什么
 - ❌ 不检查测试质量（那是 Auditor 的事）
-- ❌ 不检查代码实现质量（那是 architect_review 的事）
+- ❌ 不检查代码实现质量（那是 code_review 的事）
 - ❌ 不重新运行测试（那是 Tester 的事）
 
 ### 输出要求
@@ -3214,9 +3362,9 @@ def _get_expected_flow(pl: str) -> list[str]:
     elif pl == "PL1":
         return ["developer"]
     elif pl == "PL2":
-        return ["architect", "developer", "tester", "retrospective"]
+        return ["architect", "architect_review", "developer", "code_review", "tester", "test_review", "retrospective"]
     elif pl == "PL3":
-        return ["architect", "developer", "architect_review", "tester", "auditor", "retrospective"]
+        return ["architect", "architect_review", "developer", "code_review", "tester", "test_review", "auditor", "retrospective"]
     return ["developer"]  # fallback
 
 
@@ -3358,6 +3506,12 @@ def generate_worker_prompt_v2(task: dict, role: str = "developer", prior_context
 
     elif role == "architect_review":
         lines += [_generate_architect_review_guidance(task), ""]
+
+    elif role == "code_review":
+        lines += [_generate_code_review_guidance(task), ""]
+
+    elif role == "test_review":
+        lines += [_generate_test_review_guidance(task), ""]
 
     elif role == "retrospective":
         lines += [_generate_retrospective_guidance(task), ""]
@@ -3603,7 +3757,8 @@ def generate_spawn_instruction_v2(task: dict, role: str, prior_context: str = ""
     task_id = task["id"]
     title = task.get("title", "未命名任务")
     role_emoji = {"developer": "🔨", "tester": "🧪", "architect": "📐",
-                  "auditor": "🔍", "architect_review": "📋", "retrospective": "🔄"}.get(role, "🔨")
+                  "auditor": "🔍", "architect_review": "📋", "code_review": "🔎",
+                  "test_review": "📝", "retrospective": "🔄"}.get(role, "🔨")
 
     # Role-based iteration limits (A-06: dynamic per Architect budget)
     max_iterations = _get_role_iteration_limit(role, task)
