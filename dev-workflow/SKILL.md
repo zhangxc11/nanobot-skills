@@ -180,7 +180,8 @@ project/docs/
 - 测试数据用相对日期，不硬编码
 
 ### nanobot 开发专用
-> 详见 [references/nanobot-dev-constraints.md](references/nanobot-dev-constraints.md)
+> 开发 nanobot 自身（核心仓库、Skill 仓库）时，有额外的 dev/prod 环境隔离、路径约束等要求。
+> **必读**: [references/nanobot-dev-constraints.md](references/nanobot-dev-constraints.md)
 
 ### 写入 summary 的准则
 > 使用 dev-workflow 时，将以下内容一字不改追加到 session summary 的 `## 当前工作准则` 段。
