@@ -10,7 +10,7 @@ Digital Assistant 是 nanobot 的任务管理与质量控制中枢，采用**调
 2. **调度器集中决策** — 所有状态转换由调度器统一执行，Worker 不调用 brain_manager
 3. **文件通道为主** — Worker 报告写入文件，调度器从文件读取，保证可靠性
 4. **规则引擎 + LLM 兜底** — 确定性场景用规则引擎，模糊场景用 LLM 兜底
-5. **多角色编排** — 支持 Developer ↔ Tester 双角色闭环，自动循环控制
+5. **多角色编排** — 支持 8 角色互检流程（architect → architect_review → developer → code_review → tester → test_review → [auditor] → retrospective），自动循环控制
 
 ## 架构图
 
@@ -225,22 +225,41 @@ T-20260401-001-tester-20260401-150315.json
 }
 ```
 
-**决策规则表**：
+**决策规则表（V6.1 — 8 角色互检）**：
 
-| 当前角色 | Verdict | 条件 | Action | Next Role |
-|---------|---------|------|--------|-----------|
-| developer | pass | template=quick | mark_done | null |
-| developer | pass | template=standard-dev | dispatch_tester | tester |
-| developer | fail | retry < 2 | dispatch_developer | developer |
-| developer | fail | retry >= 2 | mark_blocked | null |
-| developer | blocked | — | mark_blocked | null |
-| tester | pass | review_level=L0/L1 | mark_done | null |
-| tester | pass | review_level=L2+ | submit_review | null |
-| tester | fail | iteration < 5 | dispatch_developer | developer |
-| tester | fail | iteration >= 5 | mark_blocked | null |
-| tester | blocked | — | mark_blocked | null |
-| * | partial | — | mark_blocked | null |
-| * | 无报告 | — | mark_blocked | null |
+| PL | 当前角色 | Verdict | Action | Next Role | 备注 |
+|----|---------|---------|--------|-----------|------|
+| PL0 | developer | pass | mark_done | — | 快速任务 |
+| PL0 | developer | fail | retry | developer | |
+| PL1 | developer | pass | mark_done | — | 纯文档任务 |
+| PL1 | developer | fail | retry | developer | |
+| PL2 | architect | pass | dispatch | architect_review | V6.1: 开发前评审架构 |
+| PL2 | architect_review | pass | dispatch | developer | |
+| PL2 | architect_review | fail | dispatch | architect | 打回重新设计 |
+| PL2 | developer | pass | dispatch | code_review | V6.1: 代码+测试覆盖检查 |
+| PL2 | developer | fail | retry | developer | |
+| PL2 | code_review | pass | dispatch | tester | |
+| PL2 | code_review | fail | dispatch | developer | D11: 打回执行角色 |
+| PL2 | tester | pass | dispatch | test_review | V6.1: 测试语义审查 |
+| PL2 | tester | fail | dispatch | developer | |
+| PL2 | test_review | pass | dispatch | retrospective | |
+| PL2 | test_review | fail | dispatch | tester | D11: 打回执行角色 |
+| PL2 | retrospective | pass | review_check | — | 检查 review level |
+| PL2 | retrospective | fail | retro_route | — | 补齐缺失环节 |
+| PL3 | (同 PL2) | — | — | — | 额外: test_review→auditor→retrospective |
+
+**角色职责（V6.1 — 8 角色体系）**：
+
+| 角色 | 职责 | Fail 打回目标 |
+|------|------|--------------|
+| architect | 规则裁决 + 方案设计 + 验收方案 | blocked |
+| architect_review | 架构评审（开发前，检查设计完整性） | architect |
+| developer | 实现功能 + 编写单元测试 | retry self |
+| code_review | 代码审查（架构一致性 + 测试覆盖合理性） | developer |
+| tester | QA 端到端测试 | developer |
+| test_review | 测试语义审查（真实性/盲区/深度） | tester |
+| auditor | 流程审计 + 测试质量检查（PL3 only） | developer/tester/architect |
+| retrospective | 流程复盘（环节完整性检查） | 缺失角色 |
 
 **循环控制**：
 - `MAX_ITERATIONS = 5` — 总轮次上限
@@ -336,8 +355,8 @@ def get_or_create_dispatcher_session():
 | 模板 | 适用场景 | Review 级别 | 角色编排 |
 |------|---------|------------|---------|
 | **quick** | 简单改动（≤10 行代码） | L0（无需 Review） | 单角色（developer） |
-| **standard-dev** | 标准开发任务 | L2（code_reviewer） | 双角色（developer ↔ tester） |
-| **long-task** | 长期任务（>1 天） | L2 | 双角色 + 阶段性 Review |
+| **standard-dev** | 标准开发任务 | L2（code_reviewer） | 8 角色互检（PL2: 7 角色, PL3: 8 角色） |
+| **long-task** | 长期任务（>1 天） | L2 | 8 角色互检 + 阶段性 Review |
 | **cron-auto** | 定时任务/提醒 | L0 | 单角色（auto） |
 | **batch-dev** | 批量需求编排 | L2 | 多任务并行 + 统一验收 |
 
