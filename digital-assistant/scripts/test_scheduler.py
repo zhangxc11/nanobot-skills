@@ -1658,19 +1658,20 @@ class TestParseWorkerReport:
         assert result is None
 
     def test_parse_multiple_reports_takes_newest(self, tmp_path, monkeypatch):
+        """When multiple reports have the same verdict, newest wins."""
         import scheduler as sched
         import time
         reports_dir = tmp_path / "brain" / "reports"
         reports_dir.mkdir(parents=True, exist_ok=True)
         monkeypatch.setattr(sched, "REPORTS_DIR", reports_dir)
 
-        # Write older report
+        # Write older report (same verdict as newer)
         report1 = reports_dir / "T-001-developer-1000000000.json"
         with report1.open("w") as f:
             json.dump({
                 "task_id": "T-001",
                 "role": "developer",
-                "verdict": "fail",
+                "verdict": "pass",
                 "summary": "Old report",
             }, f)
 
@@ -1689,6 +1690,42 @@ class TestParseWorkerReport:
         result = sched.parse_worker_report("T-001", "developer")
         assert result is not None
         assert result["summary"] == "New report"
+
+    def test_parse_multiple_reports_fail_first_priority(self, tmp_path, monkeypatch):
+        """Fail-first: an older 'fail' verdict beats a newer 'pass' (P0-3 fix)."""
+        import scheduler as sched
+        import time
+        reports_dir = tmp_path / "brain" / "reports"
+        reports_dir.mkdir(parents=True, exist_ok=True)
+        monkeypatch.setattr(sched, "REPORTS_DIR", reports_dir)
+
+        # Older report with fail
+        report1 = reports_dir / "T-001-developer-1000000000.json"
+        with report1.open("w") as f:
+            json.dump({
+                "task_id": "T-001",
+                "role": "developer",
+                "verdict": "fail",
+                "summary": "Failed report",
+            }, f)
+
+        time.sleep(0.01)
+
+        # Newer report with pass
+        report2 = reports_dir / "T-001-developer-2000000000.json"
+        with report2.open("w") as f:
+            json.dump({
+                "task_id": "T-001",
+                "role": "developer",
+                "verdict": "pass",
+                "summary": "Passed report",
+            }, f)
+
+        result = sched.parse_worker_report("T-001", "developer")
+        assert result is not None
+        # fail-first: the fail verdict should be preferred
+        assert result["verdict"] == "fail"
+        assert result["summary"] == "Failed report"
 
     def test_parse_with_role_filter(self, tmp_path, monkeypatch):
         import scheduler as sched
