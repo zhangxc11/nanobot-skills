@@ -1,5 +1,29 @@
 # Digital Assistant — 开发日志
 
+## V3 Framework Refactoring (2026-04-05)
+
+**目标**: 移除 PL0-PL3 语义猜测逻辑，统一使用 flow_type 驱动调度
+
+### 变更清单
+- [x] M3: 首次派发后写入 orchestration history 记录 + 设置 current_role
+- [x] M2-part1: 删除 `detect_task_category`（已不存在）和 evidence gate
+- [x] FLOW_TEMPLATES + `resolve_flow_type`: 新增 flow_type 模板和解析函数
+- [x] M1: FLOW_TRANSITIONS 改为 flow_type-based 键，新增 `framework_closeout` 处理
+- [x] M4: `_assert_audit_completed_safe` — 安全降级包装
+- [x] M2-part2: 删除 `determine_process_level`，所有调用点迁移到 `resolve_flow_type`
+
+**关键决策**:
+- `resolve_flow_type` 无语义猜测：优先读 `flow_type` 字段，向后兼容 `process_level` 字段映射
+- `FLOW_TEMPLATES` 定义每种 flow 的角色序列、has_auditor、has_retrospective
+- `framework_closeout` 统一处理流程收尾（auditor → retrospective → done/review）
+
+**验收结果**: ✅ 通过
+- `python3 -c "import scheduler"` — OK
+- `python3 scheduler.py --help` — OK
+- `python3 scheduler.py dry-run` — OK
+
+---
+
 ## Phase 1: 基础框架搭建 (2026-03-28 ~ 2026-03-29)
 
 **目标**: 建立任务管理基础设施，实现 brain_manager CLI 和数据结构

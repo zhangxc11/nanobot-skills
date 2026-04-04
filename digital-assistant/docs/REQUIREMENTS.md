@@ -84,7 +84,25 @@
 - ✅ Worker 报告包含必填字段：task_id、role、verdict、summary、issues、files_changed
 - ✅ 调度器支持规则引擎（确定性判断）+ LLM 兜底（模糊场景）
 - ✅ 报告写入文件（data/brain/reports/）+ 输出标记（双通道）
-- ✅ 支持多轮角色编排（Developer ↔ Tester），最多 5 轮
+- ✅ 支持多角色编排（8 角色互检），最多 18 轮（standard-dev）
+
+### 5a. Flow Type 调度框架
+
+**需求描述**：调度器通过 `flow_type` 字段驱动角色序列，不做语义猜测。
+
+**Flow Types**：
+- `cron-auto` — 单步执行（developer only），无 auditor/retrospective
+- `standard-dev` — 完整流程（architect → architect_review → developer → code_review → tester → test_review → auditor → retrospective）
+
+**`resolve_flow_type` 优先级**：
+1. `task.flow_type` 字段（显式指定）
+2. `task.process_level` 向后兼容映射（PL0→cron-auto, PL1/PL2/PL3→standard-dev）
+3. 默认 `standard-dev`
+
+**验收标准**：
+- ✅ `resolve_flow_type` 无语义猜测，只读字段
+- ✅ 向后兼容 `process_level` 字段（PL0-PL3）
+- ✅ `FLOW_TEMPLATES` 定义每种 flow 的角色序列和 auditor/retrospective 标志
 
 ### 6. 飞书集成与通知
 
