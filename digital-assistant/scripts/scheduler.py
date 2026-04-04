@@ -67,13 +67,7 @@ PRIORITY_ORDER = {"P0": 0, "P1": 1, "P2": 2}
 LEGACY_MODE = os.environ.get("LEGACY_MODE", "") == "1"
 MAX_ORCHESTRATION_ITERATIONS = 20     # Absolute ceiling — no task may exceed this
 
-# PL-based iteration baselines (A-02)
-_PL_BASE_ITERATIONS = {
-    "PL0": 3,
-    "PL1": 5,
-    "PL2": 10,
-    "PL3": 18,
-}
+# (V3: _PL_BASE_ITERATIONS removed — replaced by _FT_BASE_ITERATIONS in _compute_max_iterations)
 MAX_SAME_ROLE_CONSECUTIVE = 2         # Max consecutive partial dispatches of same role
 REPORTS_DIR = WORKSPACE / "data" / "brain" / "reports"
 
@@ -1041,7 +1035,7 @@ def _compute_max_iterations(task: dict) -> int:
 
     Priority:
     1. Architect's expected_steps (if set) + buffer(5)
-    2. PL-based baseline from _PL_BASE_ITERATIONS
+    2. Flow-type-based baseline from _FT_BASE_ITERATIONS
     3. Fallback to MAX_ORCHESTRATION_ITERATIONS
 
     The result is always capped at MAX_ORCHESTRATION_ITERATIONS.
