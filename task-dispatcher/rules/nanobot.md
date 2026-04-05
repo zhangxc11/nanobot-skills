@@ -1,6 +1,6 @@
 # nanobot 项目规则
 
-<!-- detection_keywords: nanobot, gateway, worker, webserver, scheduler, dispatcher, brain_manager, digital-assistant, skill -->
+<!-- detection_keywords: nanobot, gateway, worker, webserver, scheduler, dispatcher, brain_manager, task-dispatcher, skill -->
 
 ## 🔴 L0 MUST（违反即失败）
 

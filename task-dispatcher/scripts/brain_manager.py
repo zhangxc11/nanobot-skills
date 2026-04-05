@@ -10,7 +10,7 @@ Architecture notes:
 - review resolve accepts both Task ID (T-xxx) and Review ID (R-xxx) for flexibility
 - urgent list in BRIEFING uses ordered-dict dedup: P0 tasks and pending-review tasks
   may overlap; we preserve insertion order while eliminating duplicates
-- Template YAML files live in skills/digital-assistant/templates/
+- Template YAML files live in skills/task-dispatcher/templates/
 - Quick tasks are stored in data/brain/quick-log.jsonl (no YAML file created)
 """
 
@@ -33,7 +33,7 @@ except ImportError:
 # Paths  (resolved at import time so tests can monkey-patch before calling handlers)
 # ──────────────────────────────────────────
 
-# Script lives at:  <workspace>/skills/digital-assistant/scripts/brain_manager.py
+# Script lives at:  <workspace>/skills/task-dispatcher/scripts/brain_manager.py
 # So workspace root is 4 levels up.
 WORKSPACE_ROOT = Path(__file__).resolve().parent.parent.parent.parent
 _brain_dir_env = os.environ.get("BRAIN_DIR")

@@ -25,11 +25,11 @@ Dispatcher state:
   - iteration_count incremented each time a wake-up message is sent
 
 Usage:
-    python3 skills/digital-assistant/scripts/trigger_scheduler.py
-    python3 skills/digital-assistant/scripts/trigger_scheduler.py --parent "feishu.ST.xxx"
-    python3 skills/digital-assistant/scripts/trigger_scheduler.py --dry-run
-    python3 skills/digital-assistant/scripts/trigger_scheduler.py --cron-setup
-    python3 skills/digital-assistant/scripts/trigger_scheduler.py --status
+    python3 skills/task-dispatcher/scripts/trigger_scheduler.py
+    python3 skills/task-dispatcher/scripts/trigger_scheduler.py --parent "feishu.ST.xxx"
+    python3 skills/task-dispatcher/scripts/trigger_scheduler.py --dry-run
+    python3 skills/task-dispatcher/scripts/trigger_scheduler.py --cron-setup
+    python3 skills/task-dispatcher/scripts/trigger_scheduler.py --status
 
 Environment:
     WEBSERVER_PORT  — web-chat webserver port (default: 8081)
@@ -52,7 +52,7 @@ from urllib.request import urlopen, Request
 # ──────────────────────────────────────────
 
 WORKSPACE = Path(__file__).resolve().parent.parent.parent.parent
-SCHEDULER_SCRIPT = WORKSPACE / "skills" / "digital-assistant" / "scripts" / "scheduler.py"
+SCHEDULER_SCRIPT = SCRIPTS_DIR / "scheduler.py"
 
 _brain_dir_env = os.environ.get("BRAIN_DIR")
 BRAIN_DIR = Path(_brain_dir_env) if _brain_dir_env else WORKSPACE / "data" / "brain"
@@ -302,7 +302,7 @@ def build_scheduler_prompt(dry_run: bool = False, parent_session_id: str = "",
 **2. 调用 handle-completion**：
 ```bash
 cd {WORKSPACE}
-python3 skills/digital-assistant/scripts/scheduler.py handle-completion --auto-detect
+python3 skills/task-dispatcher/scripts/scheduler.py handle-completion --auto-detect
 ```
 
 **3. 分析 handle-completion 结果**：
@@ -331,7 +331,7 @@ python3 scripts/inbox_helper.py process --id {{消息ID}} --processed-by "schedu
 **5. 执行常规调度**：
 ```bash
 cd {WORKSPACE}
-python3 skills/digital-assistant/scripts/scheduler.py {mode}{parent_flag}
+python3 skills/task-dispatcher/scripts/scheduler.py {mode}{parent_flag}
 ```
 
 解析 `spawn_instructions`，用 spawn 派发（传入 `max_iterations`）。
@@ -373,7 +373,7 @@ python3 scripts/inbox_helper.py process --id {{消息ID}} --processed-by "schedu
 
 ```bash
 cd {WORKSPACE}
-python3 skills/digital-assistant/scripts/scheduler.py {mode}{parent_flag}
+python3 skills/task-dispatcher/scripts/scheduler.py {mode}{parent_flag}
 ```
 
 ### Step 2: 解析输出
@@ -466,11 +466,11 @@ spawn(task="<task_prompt 的完整内容>", max_iterations=<spawn instruction �
 2. 调用 handle-completion：
    ```bash
    cd {WORKSPACE}
-   python3 skills/digital-assistant/scripts/scheduler.py handle-completion --task-id T-xxx
+   python3 skills/task-dispatcher/scripts/scheduler.py handle-completion --task-id T-xxx
    ```
    如果无法识别任务 ID：
    ```bash
-   python3 skills/digital-assistant/scripts/scheduler.py handle-completion --auto-detect
+   python3 skills/task-dispatcher/scripts/scheduler.py handle-completion --auto-detect
    ```
 3. 解析 handle-completion 输出 → 进入**结果处理**
 
@@ -519,7 +519,7 @@ spawn(task="<task_prompt 的完整内容>", max_iterations=<spawn instruction �
 
 ```bash
 cd {WORKSPACE}
-python3 skills/digital-assistant/scripts/scheduler.py {mode}{parent_flag}
+python3 skills/task-dispatcher/scripts/scheduler.py {mode}{parent_flag}
 ```
 
 如果有新的 `spawn_instructions`，用 spawn tool 派发（传入 `max_iterations`）。
@@ -533,8 +533,8 @@ python3 skills/digital-assistant/scripts/scheduler.py {mode}{parent_flag}
 
 使用 feishu_notify.py 格式化通知：
 ```bash
-python3 {WORKSPACE}/skills/digital-assistant/scripts/feishu_notify.py format-done <task_id>
-python3 {WORKSPACE}/skills/digital-assistant/scripts/feishu_notify.py format-error <task_id> --reason "原因"
+python3 {WORKSPACE}/skills/task-dispatcher/scripts/feishu_notify.py format-done <task_id>
+python3 {WORKSPACE}/skills/task-dispatcher/scripts/feishu_notify.py format-error <task_id> --reason "原因"
 ```
 
 ---
@@ -850,7 +850,7 @@ def print_cron_setup():
 ```
 cron(
     action="add",
-    name="digital-assistant-scheduler",
+    name="task-dispatcher-scheduler",
     message="{cron_message}",
     every_seconds=1800,
 )

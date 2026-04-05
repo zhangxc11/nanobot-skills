@@ -66,8 +66,8 @@ Dispatcher 的目标是调度各种类型的任务（代码开发、文档整理
 
 ### 1.1 Skill 自洽定位，禁止硬编码 skill 名称
 
-- **原则**：Skill 内部通过 `__file__` 相对定位自身路径，不硬编码 `digital-assistant` 等 skill 名称。做到"放哪用哪"。
-- **违反后果**：skill 被 symlink 到 dev 目录（如 `digital-assistant-dev`）后路径全部断裂，dev 环境无法工作。
+- **原则**：Skill 内部通过 `__file__` 相对定位自身路径，不硬编码 `task-dispatcher` 等 skill 名称。做到"放哪用哪"。
+- **违反后果**：skill 被 symlink 到 dev 目录（如 `task-dispatcher-dev`）后路径全部断裂，dev 环境无法工作。
 
 ### 1.2 使用 `absolute()` 而非 `resolve()`
 
@@ -115,7 +115,7 @@ Dispatcher 的目标是调度各种类型的任务（代码开发、文档整理
 ### 3.3 Worker prompt 中的路径动态生成
 
 - **原则**：Worker prompt 中涉及的 shell 命令路径、文件路径等，从 `_path_config.py`（或等效配置）动态生成，不硬编码 skill 名称。
-- **违反后果**：与 1.1 同源问题。prompt 中写死 `digital-assistant/scripts/xxx.py`，dev 环境下 Worker 执行的命令指向 prod 路径。
+- **违反后果**：与 1.1 同源问题。prompt 中写死 `task-dispatcher/scripts/xxx.py`，dev 环境下 Worker 执行的命令指向 prod 路径。
 
 ---
 
@@ -166,7 +166,7 @@ Dispatcher 的目标是调度各种类型的任务（代码开发、文档整理
 
 ### 6.2 Dev 环境通过 skill symlink 隔离
 
-- **原则**：Dev 环境通过 symlink（如 `digital-assistant-dev` → dev 工作目录）隔离，不需要单独起进程。Prod 和 Dev 共享同一个 nanobot 实例，通过不同的 skill 路径区分。
+- **原则**：Dev 环境通过 symlink（如 `task-dispatcher-dev` → dev 工作目录）隔离，不需要单独起进程。Prod 和 Dev 共享同一个 nanobot 实例，通过不同的 skill 路径区分。
 - **违反后果**：为 dev 单独起进程，端口冲突、配置混乱、资源浪费，且 dev/prod 行为不一致。
 
 ### 6.3 部署前确认改动范围和分支状态

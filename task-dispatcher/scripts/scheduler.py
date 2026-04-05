@@ -27,9 +27,9 @@ Architecture:
                                                     (framework auto-callback)
 
 Usage (CLI — mainly for testing/debugging):
-    python3 skills/digital-assistant/scripts/scheduler.py run [--parent SESSION_ID]
-    python3 skills/digital-assistant/scripts/scheduler.py status
-    python3 skills/digital-assistant/scripts/scheduler.py dry-run [--parent SESSION_ID]
+    python3 skills/task-dispatcher/scripts/scheduler.py run [--parent SESSION_ID]
+    python3 skills/task-dispatcher/scripts/scheduler.py status
+    python3 skills/task-dispatcher/scripts/scheduler.py dry-run [--parent SESSION_ID]
 """
 
 SCHEDULER_VERSION = '2.1.0'
@@ -2889,7 +2889,7 @@ def _generate_architect_guidance() -> str:
 
 **Step 1: 识别项目上下文**
 - 从任务描述中识别涉及的项目/仓库
-- 读取规则文件: skills/digital-assistant/rules/ 下的 Markdown 文件
+- 读取规则文件: skills/task-dispatcher/rules/ 下的 Markdown 文件
 
 **Step 2: 规则裁决（必做）**
 - 读取 global.md（L0，始终适用）
@@ -3502,7 +3502,7 @@ def _generate_worker_prompt_legacy(task: dict) -> str:
         "",
     ]
 
-    bm_cmd = "python3 skills/digital-assistant/scripts/brain_manager.py"
+    bm_cmd = "python3 skills/task-dispatcher/scripts/brain_manager.py"
 
     if desc:
         lines += ["### 任务描述", desc, ""]
@@ -3591,7 +3591,7 @@ def _generate_worker_prompt_legacy(task: dict) -> str:
         if review_level == "L1":
             lines += [
                 "- 自检：完成后对照 Checklist 自查",
-                f"- `python3 skills/digital-assistant/scripts/brain_manager.py review checklist {task_id} --role code_reviewer`",
+                f"- `python3 skills/task-dispatcher/scripts/brain_manager.py review checklist {task_id} --role code_reviewer`",
             ]
         elif review_level in ("L2", "L3"):
             lines += [

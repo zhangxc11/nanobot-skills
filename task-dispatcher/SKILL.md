@@ -1,6 +1,6 @@
-# Digital Assistant — Brain Manager
+# Task Dispatcher — Brain Manager
 
-> 数字助理体系的任务管理与质量控制中枢。管理任务全生命周期（创建→执行→Review→完成）、
+> 任务调度与质量控制与质量控制中枢。管理任务全生命周期（创建→执行→Review→完成）、
 > 工作组模板匹配、结构化 Cross-Check Review、自动调度与派发。
 
 ## 触发识别
@@ -30,7 +30,7 @@
 ## CLI 入口
 
 ```bash
-python3 skills/digital-assistant/scripts/brain_manager.py <command> <subcommand> [options]
+python3 skills/task-dispatcher/scripts/brain_manager.py <command> <subcommand> [options]
 ```
 
 环境变量 `BRAIN_DIR` 可指定数据目录（默认 `data/brain/`）。
@@ -167,7 +167,7 @@ Cron（30min 兜底）
 #### 方式 1: 飞书/CLI 主动触发
 
 ```bash
-python3 skills/digital-assistant/scripts/trigger_scheduler.py --parent "当前session_id"
+python3 skills/task-dispatcher/scripts/trigger_scheduler.py --parent "当前session_id"
 ```
 
 #### 方式 2: Cron 30min 兜底
@@ -176,8 +176,8 @@ python3 skills/digital-assistant/scripts/trigger_scheduler.py --parent "当前se
 # 使用 nanobot cron tool — 极简消息，LLM 只需运行一个命令
 cron(
     action="add",
-    name="digital-assistant-scheduler",
-    message="请触发数字助理调度器：\n\npython3 skills/digital-assistant/scripts/trigger_scheduler.py\n\n直接运行上述命令，输出 JSON 结果即可。不需要做其他事情。",
+    name="task-dispatcher-scheduler",
+    message="请触发任务调度器：\n\npython3 skills/task-dispatcher/scripts/trigger_scheduler.py\n\n直接运行上述命令，输出 JSON 结果即可。不需要做其他事情。",
     every_seconds=1800,
 )
 ```
@@ -185,16 +185,16 @@ cron(
 #### 方式 3: Dry-run（只看不做）
 
 ```bash
-python3 skills/digital-assistant/scripts/trigger_scheduler.py --dry-run
+python3 skills/task-dispatcher/scripts/trigger_scheduler.py --dry-run
 ```
 
 ### 调度器 CLI
 
 ```bash
 # 直接运行调度逻辑（在 web subsession 内使用）
-python3 skills/digital-assistant/scripts/scheduler.py run [--parent SESSION_ID]
-python3 skills/digital-assistant/scripts/scheduler.py dry-run
-python3 skills/digital-assistant/scripts/scheduler.py status
+python3 skills/task-dispatcher/scripts/scheduler.py run [--parent SESSION_ID]
+python3 skills/task-dispatcher/scripts/scheduler.py dry-run
+python3 skills/task-dispatcher/scripts/scheduler.py status
 ```
 
 ---
@@ -272,7 +272,7 @@ data/brain/
 ├── BRIEFING.md         # 派生视图：任务简报
 └── REGISTRY.md         # 派生视图：任务注册表
 
-skills/digital-assistant/
+skills/task-dispatcher/
 ├── SKILL.md            # 本文件
 ├── scripts/
 │   ├── brain_manager.py        # CLI 主程序
@@ -299,7 +299,7 @@ skills/digital-assistant/
 ### 解析
 
 ```bash
-python3 skills/digital-assistant/scripts/feishu_notify.py parse "<用户消息>"
+python3 skills/task-dispatcher/scripts/feishu_notify.py parse "<用户消息>"
 ```
 
 返回 JSON：`{"ok": true, "data": {"task_id": "T-xxx", "action": "approve", "comment": "..."}}` 或 `{"ok": true, "data": null}`（无任务引用）。
@@ -332,7 +332,7 @@ python3 skills/digital-assistant/scripts/feishu_notify.py parse "<用户消息>"
 
 ```bash
 # 生成所有待审项的通知
-python3 skills/digital-assistant/scripts/review_connector.py notify-all
+python3 skills/task-dispatcher/scripts/review_connector.py notify-all
 ```
 
 ---

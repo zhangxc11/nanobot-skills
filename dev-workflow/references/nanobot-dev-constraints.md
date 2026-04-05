@@ -27,23 +27,23 @@ Skill 类仓库（`_nanobot-skills`、`feishu-docs`、`feishu-parser` 等）的 
 2. **创建 Dev Symlink**：在 `skills/` 目录下创建 `xxx-dev` 的 symlink，指向 dev-workdir 中对应的 skill 目录
    ```bash
    cd ~/.nanobot/workspace/skills
-   ln -s ../dev-workdir/_nanobot-skills/digital-assistant digital-assistant-dev
+   ln -s ../dev-workdir/_nanobot-skills/task-dispatcher task-dispatcher-dev
    ```
-   nanobot 会自动识别为名为 `digital-assistant-dev` 的独立 skill，与 prod 的 `digital-assistant` 互不干扰。
+   nanobot 会自动识别为名为 `task-dispatcher-dev` 的独立 skill，与 prod 的 `task-dispatcher` 互不干扰。
 
 3. **测试**：使用 prod 环境（8081/8082）验证 dev skill，不需要单独启动 dev 进程
    - 直接复用 prod 的 web-chat 服务，通过 dev skill 的 `trigger_scheduler.py` 触发调度：
      ```bash
      cd ~/.nanobot/workspace
-     python3 skills/digital-assistant-dev/scripts/trigger_scheduler.py
+     python3 skills/task-dispatcher-dev/scripts/trigger_scheduler.py
      ```
-     dev skill 的 `trigger_scheduler.py` 和 `scheduler.py` 通过 `Path(__file__).resolve()` 自动定位到 dev-workdir 下的代码，与 prod 的 `digital-assistant` 互不干扰
+     dev skill 的 `trigger_scheduler.py` 和 `scheduler.py` 通过 `Path(__file__).resolve()` 自动定位到 dev-workdir 下的代码，与 prod 的 `task-dispatcher` 互不干扰
    - 观察完整链路：dispatcher 接收 → spawn worker → 各角色流转 → done
    - 验证 dev skill 代码的行为符合预期后，再进入步骤 4 部署
 
 4. **部署**：验证通过后，merge feature branch 到 skill 仓库的 main 分支，prod symlink（指向 `_nanobot-skills/` 的 main）自动生效，然后删除 `-dev` symlink
    ```bash
-   rm ~/.nanobot/workspace/skills/digital-assistant-dev
+   rm ~/.nanobot/workspace/skills/task-dispatcher-dev
    ```
 
 ### 独立仓库的 Skill（对比）

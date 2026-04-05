@@ -2,7 +2,7 @@
 """
 rule_loader.py — Worker 执行规则的按需加载模块
 
-从 skills/digital-assistant/rules/ 下的 Markdown 文件加载规则，
+从 skills/task-dispatcher/rules/ 下的 Markdown 文件加载规则，
 根据任务上下文（项目、模板）选择适用的规则，并按层级渲染。
 
 渲染策略：
