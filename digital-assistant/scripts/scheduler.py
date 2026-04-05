@@ -1826,7 +1826,9 @@ def _execute_transition(task: dict, report: dict, transition: tuple, ft: str,
                     params={"summary": f"⚠️ tester passed but docs incomplete ({', '.join(doc_missing)}). {summary}"},
                     reason=f"tester passed but docs missing {doc_missing}, upgrading to manual review"
                 )
-            _assert_audit_completed_safe(task)  # Pre-condition assertion (D34) — safe version
+            safe_result = _assert_audit_completed_safe(task)  # Pre-condition assertion (D34) — safe version
+            if safe_result is not None:
+                return safe_result
             return Decision(
                 action="mark_done",
                 reason=f"tester passed, docs verified, review level {review_level}"
@@ -2767,6 +2769,7 @@ def execute_decision(decision: Decision, task: dict) -> dict:
                 "context": decision.params.get("context", ""),
                 "type": "new_spawn",
             })
+            orch["current_role"] = target_role
             task["orchestration"] = orch
             bm.save_task(task)
 
@@ -2800,6 +2803,7 @@ def execute_decision(decision: Decision, task: dict) -> dict:
                 "context": decision.params.get("context", ""),
                 "type": "follow_up",
             })
+            orch["current_role"] = role
             task["orchestration"] = orch
             bm.save_task(task)
 
