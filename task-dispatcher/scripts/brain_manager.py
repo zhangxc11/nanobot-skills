@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-brain_manager.py - Digital Assistant Brain Management CLI
+brain_manager.py - Task Dispatcher Brain Management CLI
 Phase 1.0 + 1.1 + 1.2
 
 Architecture notes:
@@ -1806,7 +1806,7 @@ def cmd_daily_report(args: argparse.Namespace) -> None:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="brain_manager.py",
-        description="Digital Assistant Brain Management CLI",
+        description="Task Dispatcher Brain Management CLI",
     )
     sub = parser.add_subparsers(dest="command", required=True)
 

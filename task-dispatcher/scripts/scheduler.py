@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 """
-scheduler.py - Digital Assistant Task Scheduler
+scheduler.py - Task Dispatcher Scheduler
 
 Stateless scheduler that produces spawn instructions for a dispatcher session.
 All state is persisted in REGISTRY (task YAML files); the scheduler itself
@@ -4043,7 +4043,7 @@ def get_scheduler_status() -> dict:
 # ──────────────────────────────────────────
 
 def main():
-    parser = argparse.ArgumentParser(description="Digital Assistant Task Scheduler")
+    parser = argparse.ArgumentParser(description="Task Dispatcher Scheduler")
     sub = parser.add_subparsers(dest="command")
 
     p_run = sub.add_parser("run", help="Dispatch queued tasks")

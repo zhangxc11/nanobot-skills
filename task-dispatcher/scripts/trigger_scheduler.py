@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-trigger_scheduler.py - Trigger the Digital Assistant Scheduler
+trigger_scheduler.py - Trigger the Task Dispatcher Scheduler
 
 Lightweight entry point that uses a **fixed dispatcher session** to run
 the scheduling task. If no active dispatcher session exists, creates one.
@@ -52,6 +52,7 @@ from urllib.request import urlopen, Request
 # ──────────────────────────────────────────
 
 WORKSPACE = Path(__file__).resolve().parent.parent.parent.parent
+SCRIPTS_DIR = Path(__file__).resolve().parent
 SCHEDULER_SCRIPT = SCRIPTS_DIR / "scheduler.py"
 
 _brain_dir_env = os.environ.get("BRAIN_DIR")
@@ -877,7 +878,7 @@ cron(
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Trigger the Digital Assistant Scheduler via fixed dispatcher session",
+        description="Trigger the Task Dispatcher Scheduler via fixed dispatcher session",
     )
     parser.add_argument("--parent", default="",
                         help="Parent session ID for tracking")
