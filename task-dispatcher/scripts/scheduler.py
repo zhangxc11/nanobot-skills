@@ -945,14 +945,19 @@ def parse_worker_report(task_id: str, role: str = None) -> dict | None:
     # Sort by mtime, take newest
     report_files.sort(key=lambda p: p.stat().st_mtime, reverse=True)
 
-    # ── P0-3 fix: fail-first priority ──
-    # When multiple reports exist for the same role, a blocked/fail verdict
-    # must NOT be overridden by a later pass. We scan all reports and prefer
-    # the most severe negative verdict over any pass.
+    # ── Round-aware fail-first priority (Bug-2 fix) ──
+    # When multiple reports exist across retry rounds (R1, R2, ...),
+    # always prefer the latest round. Within the same round, prefer the
+    # most severe negative verdict (fail-first).
     _VERDICT_PRIORITY = {"blocked": 0, "fail": 1, "partial": 2, "pass": 3}
-    best_report = None
-    best_priority = 999  # lower = more severe
 
+    def _extract_round(filename: str) -> int:
+        """Extract round number from report filename. No R-prefix = round 1."""
+        m = re.search(r'-[Rr](\d+)-', filename)
+        return int(m.group(1)) if m else 1
+
+    # First pass: collect all valid reports with their round and priority
+    valid_reports = []
     for report_file in report_files:
         try:
             with report_file.open("r", encoding="utf-8") as f:
@@ -980,20 +985,22 @@ def parse_worker_report(task_id: str, role: str = None) -> dict | None:
             if verdict not in REPORT_SCHEMA["valid_verdicts"]:
                 continue
 
+            rnd = _extract_round(report_file.name)
             vp = _VERDICT_PRIORITY.get(verdict, 3)
-            if best_report is None:
-                # First valid report (newest by mtime)
-                best_report = report
-                best_priority = vp
-            elif vp < best_priority:
-                # More severe verdict found in an older report — prefer it
-                best_report = report
-                best_priority = vp
+            valid_reports.append((rnd, vp, report))
 
         except (json.JSONDecodeError, OSError):
             continue
 
-    return best_report
+    if not valid_reports:
+        return None
+
+    # Take latest round, then fail-first within that round
+    max_round = max(r[0] for r in valid_reports)
+    latest_round = [(vp, rpt) for rnd, vp, rpt in valid_reports if rnd == max_round]
+    # Sort by verdict priority (lower = more severe)
+    latest_round.sort(key=lambda x: x[0])
+    return latest_round[0][1]
 
 
 def get_prior_context(task: dict, max_rounds: int = 2) -> str:
@@ -1251,6 +1258,42 @@ def _check_devlog_on_filesystem(task: dict, report: dict) -> bool:
     return False
 
 
+def _check_design_doc_on_filesystem(task: dict) -> bool:
+    """Check if ARCHITECTURE.md or REQUIREMENTS.md exists on filesystem (Bug-4 fix).
+
+    Searches dev-workdir with depth limit (maxdepth=3) and excludes large dirs.
+    Also checks task's design_ref/design_doc if set.
+    """
+    # Check design_ref/design_doc in task first
+    design_ref = task.get("design_ref") or task.get("design_doc")
+    if design_ref:
+        p = Path(design_ref) if Path(design_ref).is_absolute() else WORKSPACE / design_ref
+        if p.exists():
+            return True
+
+    dev_dir = Path(os.environ.get("DEV_WORKDIR", str(WORKSPACE / "dev-workdir")))
+    if not dev_dir.exists():
+        return False
+
+    # Walk with depth limit to avoid performance issues in large trees
+    _EXCLUDE_DIRS = {"node_modules", ".git", "__pycache__", "venv", ".venv", ".tox", "dist", "build"}
+    _TARGET_NAMES = {"ARCHITECTURE.md", "architecture.md", "REQUIREMENTS.md", "requirements.md"}
+    max_depth = 3
+
+    for root, dirs, files in os.walk(dev_dir):
+        # Calculate current depth relative to dev_dir
+        depth = Path(root).relative_to(dev_dir).parts
+        if len(depth) >= max_depth:
+            dirs.clear()  # stop descending
+            continue
+        # Prune excluded directories
+        dirs[:] = [d for d in dirs if d not in _EXCLUDE_DIRS]
+        for fname in files:
+            if fname in _TARGET_NAMES:
+                return True
+    return False
+
+
 def _gate_developer_docs(task: dict, report: dict, ft: str):
     """Gate: check docs when developer passes (standard-dev only).
 
@@ -1305,6 +1348,12 @@ def _gate_developer_docs(task: dict, report: dict, ft: str):
     # --- Layer 2: Original doc triplet check ---
     doc_ok, doc_missing = check_doc_triplet(task, report)
     if not doc_ok:
+        # Bug-4 fix: if only design doc is missing, do filesystem fallback
+        if doc_missing == ["ARCHITECTURE.md or design_ref"]:
+            if _check_design_doc_on_filesystem(task):
+                doc_ok = True
+                doc_missing = []
+    if not doc_ok:
         retry_count = _count_doc_retries(task)
         if retry_count >= MAX_DOC_RETRY:
             summary = report.get("summary", "")
@@ -1349,7 +1398,14 @@ def _gate_tester_coverage(task: dict, report: dict, ft: str):
 
     # Calculate coverage
     evidence = report.get("test_evidence") or []
-    covered_ids = {e.get("step_id") for e in evidence if isinstance(e, dict) and e.get("step_id")}
+
+    # Bug-3 fix: normalize step_id by stripping R{N}- prefix for matching
+    def _normalize_step_id(sid: str) -> str:
+        """Strip R{N}- prefix from step_id for matching."""
+        m = re.match(r'^[Rr]\d+-(.+)$', sid)
+        return m.group(1) if m else sid
+
+    covered_ids = {_normalize_step_id(e.get("step_id", "")) for e in evidence if isinstance(e, dict) and e.get("step_id")}
     plan_ids = {s.get("step_id") for s in acceptance_plan if isinstance(s, dict) and s.get("step_id")}
     coverage = len(covered_ids.intersection(plan_ids)) / len(plan_ids) if plan_ids else 1.0
     uncovered = plan_ids - covered_ids
@@ -1373,7 +1429,8 @@ def _gate_tester_coverage(task: dict, report: dict, ft: str):
                     f"⚠️ 验收方案覆盖率不足 ({coverage:.0%})。\n"
                     f"未覆盖步骤: {', '.join(sorted(uncovered))}\n\n"
                     f"请按验收方案逐项执行并在 test_evidence 中标注 step_id。\n"
-                    f"每条 evidence 必须包含 step_id 字段对应验收方案中的步骤。"
+                    f"每条 evidence 必须包含 step_id 字段对应验收方案中的步骤。\n"
+                    f"⚠️ 请使用验收方案中的原始 step_id (如 T1, T2, ...)，不要添加 R{{N}} 前缀。"
                 ),
             },
             reason=f"tester evidence coverage {coverage:.0%} < {coverage_threshold:.0%}, uncovered: {uncovered}"
@@ -2770,8 +2827,13 @@ def execute_decision(decision: Decision, task: dict) -> dict:
                 "type": "new_spawn",
             })
             orch["current_role"] = target_role
-            task["orchestration"] = orch
-            bm.save_task(task)
+
+            # Bug-1 fix: merge-save pattern — reload fresh task from disk,
+            # only merge orchestration subtree to prevent stale status overwrite
+            fresh_task = bm.load_task(task_id)
+            fresh_task["orchestration"] = orch
+            bm.save_task(fresh_task)
+            task = fresh_task  # sync reference for subsequent code
 
             # Generate spawn instruction
             role = decision.params.get("role", "developer")
@@ -2804,8 +2866,13 @@ def execute_decision(decision: Decision, task: dict) -> dict:
                 "type": "follow_up",
             })
             orch["current_role"] = role
-            task["orchestration"] = orch
-            bm.save_task(task)
+
+            # Bug-1 fix: merge-save pattern — reload fresh task from disk,
+            # only merge orchestration subtree to prevent stale status overwrite
+            fresh_task = bm.load_task(task_id)
+            fresh_task["orchestration"] = orch
+            bm.save_task(fresh_task)
+            task = fresh_task  # sync reference for subsequent code
 
             session_id = _get_follow_up_session(task, role)
             follow_up_message = decision.params.get("context", "")
