@@ -225,28 +225,41 @@ T-20260401-001-tester-20260401-150315.json
 }
 ```
 
-**决策规则表（V6.1 — 8 角色互检）**：
+**决策规则表（V3 — flow_type-based）**：
 
-| PL | 当前角色 | Verdict | Action | Next Role | 备注 |
-|----|---------|---------|--------|-----------|------|
-| PL0 | developer | pass | mark_done | — | 快速任务 |
-| PL0 | developer | fail | retry | developer | |
-| PL1 | developer | pass | mark_done | — | 纯文档任务 |
-| PL1 | developer | fail | retry | developer | |
-| PL2 | architect | pass | dispatch | architect_review | V6.1: 开发前评审架构 |
-| PL2 | architect_review | pass | dispatch | developer | |
-| PL2 | architect_review | fail | dispatch | architect | 打回重新设计 |
-| PL2 | developer | pass | dispatch | code_review | V6.1: 代码+测试覆盖检查 |
-| PL2 | developer | fail | retry | developer | |
-| PL2 | code_review | pass | dispatch | tester | |
-| PL2 | code_review | fail | dispatch | developer | D11: 打回执行角色 |
-| PL2 | tester | pass | dispatch | test_review | V6.1: 测试语义审查 |
-| PL2 | tester | fail | dispatch | developer | |
-| PL2 | test_review | pass | dispatch | retrospective | |
-| PL2 | test_review | fail | dispatch | tester | D11: 打回执行角色 |
-| PL2 | retrospective | pass | review_check | — | 检查 review level |
-| PL2 | retrospective | fail | retro_route | — | 补齐缺失环节 |
-| PL3 | (同 PL2) | — | — | — | 额外: test_review→auditor→retrospective |
+| flow_type | 当前角色 | Verdict | Action | Next Role |
+|-----------|---------|---------|--------|-----------|
+| cron-auto | developer | pass | framework_closeout | — |
+| cron-auto | developer | fail | retry | developer |
+| standard-dev | architect | pass | dispatch | architect_review |
+| standard-dev | architect | fail | blocked | — |
+| standard-dev | architect_review | pass | dispatch | developer |
+| standard-dev | architect_review | fail | dispatch | architect |
+| standard-dev | developer | pass | dispatch | code_review |
+| standard-dev | developer | fail | retry | developer |
+| standard-dev | code_review | pass | dispatch | tester |
+| standard-dev | code_review | fail | dispatch | developer |
+| standard-dev | tester | pass | dispatch | test_review |
+| standard-dev | tester | fail | dispatch | developer |
+| standard-dev | test_review | pass | framework_closeout | — |
+| standard-dev | test_review | fail | dispatch | tester |
+
+**framework_closeout 链**：
+- `has_auditor=True` → dispatch auditor
+- `has_retrospective=True` → dispatch retrospective
+- else → `_closeout_done_or_review`
+
+**Flow Templates (`FLOW_TEMPLATES`)**：
+
+| flow_type | roles | has_auditor | has_retrospective |
+|-----------|-------|-------------|-------------------|
+| cron-auto | [developer] | False | False |
+| standard-dev | [architect, architect_review, developer, code_review, tester, test_review] | True | True |
+
+**`resolve_flow_type(task)` 优先级**：
+1. `task.flow_type` 字段（直接指定）
+2. `task.process_level` 向后兼容映射（PL0→cron-auto, PL1-3→standard-dev）
+3. 默认 `standard-dev`
 
 **角色职责（V6.1 — 8 角色体系）**：
 
