@@ -31,7 +31,7 @@ if str(_SCRIPTS_DIR) not in sys.path:
 
 def _reload_bm(brain_dir: str):
     """Set BRAIN_DIR env var and reload brain_manager; return the module."""
-    os.environ["BRAIN_DIR"] = brain_dir
+    os.environ["TASK_DATA_DIR"] = brain_dir
     import task_store as brain_manager
     importlib.reload(brain_manager)
     return brain_manager

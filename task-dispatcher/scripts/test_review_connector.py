@@ -29,7 +29,7 @@ if str(_SCRIPTS_DIR) not in sys.path:
 
 def _setup_modules(brain_dir: str):
     """Reload brain_manager (with new BRAIN_DIR) and review_connector; return both."""
-    os.environ["BRAIN_DIR"] = brain_dir
+    os.environ["TASK_DATA_DIR"] = brain_dir
     import task_store as brain_manager
     importlib.reload(brain_manager)
     import review_connector

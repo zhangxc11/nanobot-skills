@@ -33,14 +33,14 @@ def isolated_brain(tmp_path, monkeypatch):
     (brain_dir / "reviews").mkdir()
     (brain_dir / "review-results").mkdir()
 
-    monkeypatch.setenv("BRAIN_DIR", str(brain_dir))
+    monkeypatch.setenv("TASK_DATA_DIR", str(brain_dir))
 
     scripts_dir = Path(__file__).resolve().parent
     if str(scripts_dir) not in sys.path:
         sys.path.insert(0, str(scripts_dir))
 
     import task_store as bm
-    monkeypatch.setattr(bm, "BRAIN_DIR", brain_dir)
+    monkeypatch.setattr(bm, "TASK_DATA_DIR", brain_dir)
     monkeypatch.setattr(bm, "TASKS_DIR", brain_dir / "tasks")
     monkeypatch.setattr(bm, "REVIEWS_DIR", brain_dir / "reviews")
     monkeypatch.setattr(bm, "BRIEFING_FILE", brain_dir / "BRIEFING.md")

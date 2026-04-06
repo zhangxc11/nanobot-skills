@@ -9,7 +9,7 @@
 
 | 场景 | 触发信号 |
 |------|---------|
-| 新 session 启动 | 每个 session 启动时读取 `data/brain/BRIEFING.md` 了解当前状态 |
+| 新 session 启动 | 每个 session 启动时读取 `data/tasks/BRIEFING.md` 了解当前状态 |
 | 用户提到任务管理 | "任务"、"进度"、"待办"、"排期"、"调度"、"review"、"审查" |
 | 用户提新需求 | "帮我做..."、"开发..."、"实现..."、"修复..." → 注册任务 |
 | 查看工作状态 | "现在在做什么"、"有什么待审"、"工作简报" |
@@ -19,7 +19,7 @@
 ## 新 Session 启动流程
 
 ```
-1. 读取 data/brain/BRIEFING.md → 了解当前工作状态
+1. 读取 data/tasks/BRIEFING.md → 了解当前工作状态
 2. 如有紧急事项（P0 任务/待审项）→ 主动告知用户
 3. 如用户有新需求 → 对齐目标后注册任务
 4. 如需派发任务 → 触发调度器
@@ -33,7 +33,7 @@
 python3 skills/task-dispatcher/scripts/task_store.py <command> <subcommand> [options]
 ```
 
-环境变量 `BRAIN_DIR` 可指定数据目录（默认 `data/brain/`）。
+环境变量 `TASK_DATA_DIR` 可指定数据目录（默认 `data/tasks/`）。
 
 ---
 
@@ -153,7 +153,7 @@ Cron（30min 兜底）
 
 ### 调度器状态（dispatcher.json v2）
 
-- **状态文件**: `data/brain/dispatcher.json`
+- **状态文件**: `data/tasks/dispatcher.json`
 - **格式**: `{"session_id": "...", "session_key": "...", "version": 2, "generation": N, "iteration_count": N, "previous_session_id": "...", ...}`
 - **换代阈值**: 500 轮唤醒 **或** 1500 条消息（双重检测，先到先换代）
 - **并发保护**: session 5 分钟内有活动时跳过唤醒（防止重复派发）
@@ -265,7 +265,7 @@ python3 skills/task-dispatcher/scripts/scheduler.py status
 ## 数据目录结构
 
 ```
-data/brain/
+data/tasks/
 ├── tasks/              # 任务 YAML (T-xxxxxxxx-nnn.yaml)
 ├── reviews/            # Review YAML (R-xxx.yaml)
 ├── review-results/     # 结构化 Review 结果

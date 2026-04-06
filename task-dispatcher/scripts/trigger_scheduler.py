@@ -55,9 +55,10 @@ WORKSPACE = Path(__file__).resolve().parent.parent.parent.parent
 SCRIPTS_DIR = Path(__file__).resolve().parent
 SCHEDULER_SCRIPT = SCRIPTS_DIR / "scheduler.py"
 
-_brain_dir_env = os.environ.get("BRAIN_DIR")
-BRAIN_DIR = Path(_brain_dir_env) if _brain_dir_env else WORKSPACE / "data" / "brain"
-DISPATCHER_FILE = BRAIN_DIR / "dispatcher.json"
+_brain_dir_env = os.environ.get("TASK_DATA_DIR") or os.environ.get("BRAIN_DIR")
+TASK_DATA_DIR = Path(_brain_dir_env) if _brain_dir_env else WORKSPACE / "data" / "tasks"
+BRAIN_DIR = TASK_DATA_DIR  # backward compat
+DISPATCHER_FILE = TASK_DATA_DIR / "dispatcher.json"
 
 WEBSERVER_PORT = int(os.environ.get("WEBSERVER_PORT", "8081"))
 WORKER_PORT = int(os.environ.get("WORKER_PORT", "8082"))
