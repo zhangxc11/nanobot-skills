@@ -6,6 +6,12 @@
 
 **只查流程，不碰质量。** 代码质量、测试质量由 Architect 在审查阶段负责。
 
+## ⚠️ 必须执行的前置步骤
+
+1. **读取任务对应的 pattern 文件**（如 `patterns/dev-pipeline.md`），获取标准流程定义
+2. 以 pattern 中的流转规则和 Cross-Check 矩阵作为审计 baseline
+3. **禁止以调度方 prompt 中描述的流程作为 baseline** — prompt 可能本身就有遗漏
+
 ## 审查维度
 
 1. **环节完整性** — 该走的角色是否都走了？有没有跳过的环节？
@@ -31,6 +37,13 @@
 
 ```json
 {
+  "baseline": {
+    "pattern_file": "引用的 pattern 文件路径",
+    "standard_stages": ["从 pattern 中提取的标准环节列表"],
+    "stage_comparison": [
+      {"standard": "标准环节名", "actual": "实际执行情况", "status": "✅ 已执行 | ❌ 缺失 | ⚠️ 偏差"}
+    ]
+  },
   "verdict": "pass|fail",
   "suggested_target": "developer|tester|architect",
   "issues": ["具体问题描述"],
