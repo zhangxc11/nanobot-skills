@@ -176,7 +176,8 @@ class TestStateTransitions(BrainManagerTestCase):
         self._update(self.task_id, status="executing")
         task = self.bm.load_task(self.task_id)
         self.assertEqual(len(task["history"]), 2)
-        self.assertEqual(task["history"][1]["action"], "updated")
+        # cmd_task_update now delegates to transition_task, which records "status_change"
+        self.assertEqual(task["history"][1]["action"], "status_change")
         self.assertIn("queued → executing", task["history"][1]["detail"])
 
     def test_cancelled_can_reactivate_to_queued(self):
@@ -1620,17 +1621,31 @@ class TestReviewLevelPriorityFix(BrainManagerTestCase):
 # ─────────────────────────────────────────────
 
 class TestFSMReviewGate(BrainManagerTestCase):
+    """Tests for the auditor gate (v10): executing→done requires auditor pass."""
 
-    def test_L2_executing_to_done_blocked(self):
-        """L2 task should not transition executing→done without review."""
-        r = self._create(title="L2 task", type_="standard-dev", priority="P1")
+    def _inject_auditor_pass(self, task_id: str):
+        """Helper: inject auditor pass into orchestration history."""
+        task = self.bm.load_task(task_id)
+        orch = task.setdefault("orchestration", {})
+        orch.setdefault("history", []).append({
+            "type": "completion",
+            "role": "auditor",
+            "verdict": "pass",
+            "summary": "test auditor pass",
+            "timestamp": self.bm.now_iso(),
+        })
+        self.bm.save_task(task)
+
+    def test_executing_to_done_blocked_without_auditor(self):
+        """Any task should not transition executing→done without auditor pass."""
+        r = self._create(title="No auditor task", type_="standard-dev", priority="P1")
         task = self.bm.load_task(r["data"]["id"])
         task["workgroup"]["template"] = "standard-dev"
         self.bm.save_task(task)
         self.bm.transition_task(task["id"], "executing")
         with self.assertRaises(ValueError) as ctx:
             self.bm.transition_task(task["id"], "done")
-        self.assertIn("review", str(ctx.exception))
+        self.assertIn("Auditor", str(ctx.exception))
 
     def test_L2_executing_to_review_allowed(self):
         """L2 task can transition executing→review."""
@@ -1642,19 +1657,20 @@ class TestFSMReviewGate(BrainManagerTestCase):
         updated = self.bm.transition_task(task["id"], "review")
         self.assertEqual(updated["status"], "review")
 
-    def test_L0_executing_to_done_allowed(self):
-        """L0 task can transition executing→done directly."""
-        r = self._create(title="L0 task", type_="quick", priority="P2")
+    def test_executing_to_done_allowed_with_auditor(self):
+        """Task with auditor pass can transition executing→done."""
+        r = self._create(title="Audited task", type_="quick", priority="P2")
         task = self.bm.load_task(r["data"]["id"])
         task["workgroup"]["template"] = "quick"
         self.bm.save_task(task)
         self.bm.transition_task(task["id"], "executing")
+        self._inject_auditor_pass(task["id"])
         updated = self.bm.transition_task(task["id"], "done")
         self.assertEqual(updated["status"], "done")
 
-    def test_L2_force_executing_to_done_allowed(self):
-        """L2 task can transition executing→done with force=True."""
-        r = self._create(title="L2 force", type_="standard-dev", priority="P1")
+    def test_force_executing_to_done_allowed(self):
+        """Task can transition executing→done with force=True (no auditor needed)."""
+        r = self._create(title="Force done", type_="standard-dev", priority="P1")
         task = self.bm.load_task(r["data"]["id"])
         task["workgroup"]["template"] = "standard-dev"
         self.bm.save_task(task)
@@ -1662,16 +1678,16 @@ class TestFSMReviewGate(BrainManagerTestCase):
         updated = self.bm.transition_task(task["id"], "done", force=True)
         self.assertEqual(updated["status"], "done")
 
-    def test_L3_executing_to_done_blocked(self):
-        """L3 task should not transition executing→done."""
-        r = self._create(title="L3 task", type_="standard-dev", priority="P0")
+    def test_P0_executing_to_done_blocked_without_auditor(self):
+        """P0 task should not transition executing→done without auditor."""
+        r = self._create(title="P0 task", type_="standard-dev", priority="P0")
         task = self.bm.load_task(r["data"]["id"])
         self.bm.transition_task(task["id"], "executing")
         with self.assertRaises(ValueError):
             self.bm.transition_task(task["id"], "done")
 
     def test_review_to_done_not_affected(self):
-        """review→done should not be affected by the gate."""
+        """review→done should not be affected by the auditor gate."""
         r = self._create(title="Review done", type_="standard-dev", priority="P1")
         task = self.bm.load_task(r["data"]["id"])
         task["workgroup"]["template"] = "standard-dev"
@@ -1681,19 +1697,19 @@ class TestFSMReviewGate(BrainManagerTestCase):
         updated = self.bm.transition_task(task["id"], "done")
         self.assertEqual(updated["status"], "done")
 
-    def test_cmd_L2_executing_to_done_blocked(self):
-        """CLI: L2 task --status done should fail."""
-        r = self._create(title="CLI L2", type_="standard-dev", priority="P1")
+    def test_cmd_executing_to_done_blocked_without_auditor(self):
+        """CLI: executing→done without auditor should fail."""
+        r = self._create(title="CLI no auditor", type_="standard-dev", priority="P1")
         task = self.bm.load_task(r["data"]["id"])
         task["workgroup"]["template"] = "standard-dev"
         self.bm.save_task(task)
         self._update(r["data"]["id"], status="executing")
         result = self._update(r["data"]["id"], status="done")
         self.assertFalse(result["ok"])
-        self.assertIn("review", result["error"])
+        self.assertIn("Auditor", result["error"])
 
-    def test_cmd_L2_force_done_allowed(self):
-        """CLI: L2 task --status done --force should succeed."""
+    def test_cmd_force_done_allowed(self):
+        """CLI: --status done --force should succeed without auditor."""
         r = self._create(title="CLI force", type_="standard-dev", priority="P1")
         task = self.bm.load_task(r["data"]["id"])
         task["workgroup"]["template"] = "standard-dev"

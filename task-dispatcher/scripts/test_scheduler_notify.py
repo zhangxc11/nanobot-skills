@@ -93,7 +93,7 @@ class TestNotifyOnReview:
     """When tester passes and task is promoted to review, user should be notified."""
 
     def test_promote_to_review_sends_notification(self, monkeypatch):
-        import scheduler as sched
+        import scheduler_legacy as sched
 
         task = _create_task("T-20260331-001", status="executing", priority="P1",
                             title="修复调度器通知缺陷")
@@ -122,7 +122,7 @@ class TestNotifyOnReview:
         assert "Review" in call["text"] or "review" in call["text"].lower()
 
     def test_review_notification_contains_go_nogo_hint(self, monkeypatch):
-        import scheduler as sched
+        import scheduler_legacy as sched
 
         task = _create_task("T-20260331-002", status="executing", priority="P0",
                             title="紧急修复任务")
@@ -147,7 +147,7 @@ class TestNotifyOnReview:
 
     def test_review_notification_failure_does_not_block(self, monkeypatch):
         """Even if notification fails, execute_decision should still succeed."""
-        import scheduler as sched
+        import scheduler_legacy as sched
 
         task = _create_task("T-20260331-003", status="executing", priority="P1",
                             title="通知失败不阻塞")
@@ -174,7 +174,7 @@ class TestNotifyOnBlocked:
     """When task is blocked, user should be notified with the reason."""
 
     def test_mark_blocked_sends_notification(self, monkeypatch):
-        import scheduler as sched
+        import scheduler_legacy as sched
 
         task = _create_task("T-20260331-010", status="executing",
                             title="需要人工决策的任务")
@@ -200,7 +200,7 @@ class TestNotifyOnBlocked:
         assert "需要权限配置" in call["text"] or "阻塞" in call["text"]
 
     def test_blocked_notification_contains_action_hints(self, monkeypatch):
-        import scheduler as sched
+        import scheduler_legacy as sched
 
         task = _create_task("T-20260331-011", status="executing",
                             title="迭代次数超限任务")
@@ -225,7 +225,7 @@ class TestNotifyOnBlocked:
 
     def test_blocked_notification_uses_error_format(self, monkeypatch):
         """Blocked notification should use the error/alert emoji format."""
-        import scheduler as sched
+        import scheduler_legacy as sched
 
         task = _create_task("T-20260331-012", status="executing",
                             title="格式验证任务")
@@ -256,7 +256,7 @@ class TestNotifyOnDone:
     """When task is completed, user should be notified."""
 
     def test_mark_done_sends_notification(self, monkeypatch):
-        import scheduler as sched
+        import scheduler_legacy as sched
 
         task = _create_task("T-20260331-020", status="executing", priority="P2",
                             template="quick", title="快速完成的任务")
@@ -280,7 +280,7 @@ class TestNotifyOnDone:
         assert call["task_id"] == "T-20260331-020"
 
     def test_done_notification_contains_completion_indicator(self, monkeypatch):
-        import scheduler as sched
+        import scheduler_legacy as sched
 
         task = _create_task("T-20260331-021", status="executing", priority="P1",
                             template="quick", title="完成通知格式验证")
@@ -308,7 +308,7 @@ class TestNotifyOnDone:
 
     def test_done_notification_failure_does_not_block(self, monkeypatch):
         """Even if notification fails, mark_done should still succeed."""
-        import scheduler as sched
+        import scheduler_legacy as sched
 
         task = _create_task("T-20260331-022", status="executing", priority="P2",
                             template="quick", title="通知失败不影响")
@@ -335,7 +335,7 @@ class TestNoNotifyOnDispatch:
     """dispatch_role should NOT send feishu notification (only state transitions do)."""
 
     def test_dispatch_role_no_notification(self, monkeypatch):
-        import scheduler as sched
+        import scheduler_legacy as sched
 
         task = _create_task("T-20260331-030", status="executing")
         decision = sched.Decision(
@@ -364,7 +364,7 @@ class TestNotifyTaskStateChange:
     """Test the notify_task_state_change function directly."""
 
     def test_review_state_formats_correctly(self, monkeypatch):
-        import scheduler as sched
+        import scheduler_legacy as sched
 
         task = {"id": "T-20260331-040", "title": "直接测试通知格式"}
 
@@ -380,7 +380,7 @@ class TestNotifyTaskStateChange:
         assert "T-040" in send_calls[0]["text"] or "T-20260331-040" in send_calls[0]["text"]
 
     def test_blocked_state_includes_reason(self, monkeypatch):
-        import scheduler as sched
+        import scheduler_legacy as sched
 
         task = {"id": "T-20260331-041", "title": "阻塞原因测试"}
 
@@ -395,7 +395,7 @@ class TestNotifyTaskStateChange:
         assert "API key missing" in send_calls[0]["text"]
 
     def test_done_state_sends_completion(self, monkeypatch):
-        import scheduler as sched
+        import scheduler_legacy as sched
 
         task = {"id": "T-20260331-042", "title": "完成通知测试"}
 
@@ -410,7 +410,7 @@ class TestNotifyTaskStateChange:
         assert "✅" in send_calls[0]["text"]
 
     def test_unknown_state_returns_false(self, monkeypatch):
-        import scheduler as sched
+        import scheduler_legacy as sched
 
         task = {"id": "T-20260331-043", "title": "未知状态"}
 
@@ -424,7 +424,7 @@ class TestNotifyTaskStateChange:
 
     def test_recipient_is_correct(self, monkeypatch):
         """Verify the notification goes to the correct feishu recipient."""
-        import scheduler as sched
+        import scheduler_legacy as sched
         assert sched.FEISHU_NOTIFY_RECIPIENT == "ou_2fba93da1d059fd2520c2f385743f175"
 
 
@@ -436,7 +436,7 @@ class TestSendFeishuNotify:
     """Test the low-level _send_feishu_notify function."""
 
     def test_calls_subprocess_with_correct_args(self, monkeypatch):
-        import scheduler as sched
+        import scheduler_legacy as sched
         import subprocess
 
         captured_args = []
@@ -466,7 +466,7 @@ class TestSendFeishuNotify:
         assert "T-001" in cmd
 
     def test_returns_false_on_subprocess_failure(self, monkeypatch):
-        import scheduler as sched
+        import scheduler_legacy as sched
         import subprocess
 
         monkeypatch.setattr(subprocess, "run",
@@ -476,7 +476,7 @@ class TestSendFeishuNotify:
         assert result is False
 
     def test_returns_false_on_exception(self, monkeypatch):
-        import scheduler as sched
+        import scheduler_legacy as sched
         import subprocess
 
         def mock_run(*a, **kw):
@@ -488,7 +488,7 @@ class TestSendFeishuNotify:
         assert result is False
 
     def test_returns_false_if_messenger_script_missing(self, monkeypatch, tmp_path):
-        import scheduler as sched
+        import scheduler_legacy as sched
 
         # Point to a non-existent path
         fake_scripts_dir = tmp_path / "nonexistent"

@@ -63,7 +63,7 @@ def isolated_brain(tmp_path, monkeypatch):
 
     # Reimport scheduler to pick up env var
     if "scheduler" in sys.modules:
-        import scheduler as sched
+        import scheduler_legacy as sched
         sched.TEST_EVIDENCE_ENABLED = True
 
     yield brain_dir
@@ -108,7 +108,7 @@ class TestTesterEvidenceValidation:
 
     def test_pass_with_valid_evidence_proceeds(self):
         """Tester pass + valid test_evidence → normal flow (promote_to_review for L2+)."""
-        import scheduler as sched
+        import scheduler_legacy as sched
         sched.TEST_EVIDENCE_ENABLED = True
 
         report = _make_report(test_evidence=[
@@ -123,7 +123,7 @@ class TestTesterEvidenceValidation:
 
     def test_pass_without_evidence_dispatches_back(self):
         """Tester pass + no test_evidence → dispatch back to tester."""
-        import scheduler as sched
+        import scheduler_legacy as sched
         sched.TEST_EVIDENCE_ENABLED = True
 
         report = _make_report()  # No test_evidence
@@ -137,7 +137,7 @@ class TestTesterEvidenceValidation:
 
     def test_pass_with_empty_evidence_dispatches_back(self):
         """Tester pass + empty test_evidence=[] → dispatch back to tester."""
-        import scheduler as sched
+        import scheduler_legacy as sched
         sched.TEST_EVIDENCE_ENABLED = True
 
         report = _make_report(test_evidence=[])
@@ -149,7 +149,7 @@ class TestTesterEvidenceValidation:
 
     def test_pass_with_invalid_evidence_missing_type(self):
         """Evidence item missing 'type' → treated as invalid."""
-        import scheduler as sched
+        import scheduler_legacy as sched
         sched.TEST_EVIDENCE_ENABLED = True
 
         report = _make_report(test_evidence=[
@@ -163,7 +163,7 @@ class TestTesterEvidenceValidation:
 
     def test_pass_with_invalid_evidence_missing_result(self):
         """Evidence item missing 'result' → treated as invalid."""
-        import scheduler as sched
+        import scheduler_legacy as sched
         sched.TEST_EVIDENCE_ENABLED = True
 
         report = _make_report(test_evidence=[
@@ -177,7 +177,7 @@ class TestTesterEvidenceValidation:
 
     def test_pass_with_evidence_string_not_list(self):
         """test_evidence as string (not list) → treated as invalid."""
-        import scheduler as sched
+        import scheduler_legacy as sched
         sched.TEST_EVIDENCE_ENABLED = True
 
         report = _make_report(test_evidence="I ran the tests")
@@ -189,7 +189,7 @@ class TestTesterEvidenceValidation:
 
     def test_test_results_alias_accepted(self):
         """test_results field accepted as alias for test_evidence."""
-        import scheduler as sched
+        import scheduler_legacy as sched
         sched.TEST_EVIDENCE_ENABLED = True
 
         report = _make_report(test_results=[
@@ -203,7 +203,7 @@ class TestTesterEvidenceValidation:
 
     def test_fail_not_affected_by_evidence_check(self):
         """Tester fail → dispatches developer regardless of evidence."""
-        import scheduler as sched
+        import scheduler_legacy as sched
         sched.TEST_EVIDENCE_ENABLED = True
 
         report = _make_report(verdict="fail", summary="Tests failed")
@@ -216,7 +216,7 @@ class TestTesterEvidenceValidation:
 
     def test_partial_not_affected_by_evidence_check(self):
         """Tester partial → not affected by evidence check."""
-        import scheduler as sched
+        import scheduler_legacy as sched
         sched.TEST_EVIDENCE_ENABLED = True
 
         report = _make_report(verdict="partial", summary="Partial progress")
@@ -233,7 +233,7 @@ class TestEvidenceRetryEscalation:
 
     def test_first_retry_dispatches_back(self):
         """First missing evidence → dispatch back to tester."""
-        import scheduler as sched
+        import scheduler_legacy as sched
         sched.TEST_EVIDENCE_ENABLED = True
 
         report = _make_report()
@@ -245,7 +245,7 @@ class TestEvidenceRetryEscalation:
 
     def test_second_retry_dispatches_back(self):
         """Second missing evidence (1 prior retry) → still dispatch back."""
-        import scheduler as sched
+        import scheduler_legacy as sched
         sched.TEST_EVIDENCE_ENABLED = True
 
         report = _make_report()
@@ -259,7 +259,7 @@ class TestEvidenceRetryEscalation:
 
     def test_third_retry_escalates_to_review(self):
         """Third missing evidence (2 prior retries) → escalate to promote_to_review."""
-        import scheduler as sched
+        import scheduler_legacy as sched
         sched.TEST_EVIDENCE_ENABLED = True
 
         report = _make_report()
@@ -278,12 +278,12 @@ class TestCountEvidenceRetries:
     """Test _count_evidence_retries function."""
 
     def test_empty_history(self):
-        import scheduler as sched
+        import scheduler_legacy as sched
         task = _make_task(history=[])
         assert sched._count_evidence_retries(task) == 0
 
     def test_no_evidence_retries(self):
-        import scheduler as sched
+        import scheduler_legacy as sched
         task = _make_task(history=[
             {"role": "developer", "verdict": "pass", "reason": "developer done"},
             {"role": "tester", "verdict": "fail", "reason": "tests failed"},
@@ -291,14 +291,14 @@ class TestCountEvidenceRetries:
         assert sched._count_evidence_retries(task) == 0
 
     def test_one_evidence_retry(self):
-        import scheduler as sched
+        import scheduler_legacy as sched
         task = _make_task(history=[
             {"role": "tester", "verdict": "pass", "reason": "tester passed but no test_evidence"},
         ])
         assert sched._count_evidence_retries(task) == 1
 
     def test_two_evidence_retries(self):
-        import scheduler as sched
+        import scheduler_legacy as sched
         task = _make_task(history=[
             {"role": "tester", "verdict": "pass", "reason": "tester passed but no test_evidence"},
             {"role": "tester", "verdict": "pass", "reason": "tester passed but no test_evidence"},
@@ -306,7 +306,7 @@ class TestCountEvidenceRetries:
         assert sched._count_evidence_retries(task) == 2
 
     def test_mixed_history(self):
-        import scheduler as sched
+        import scheduler_legacy as sched
         task = _make_task(history=[
             {"role": "developer", "verdict": "pass", "reason": "dev done"},
             {"role": "tester", "verdict": "pass", "reason": "tester passed but no test_evidence"},
@@ -321,7 +321,7 @@ class TestFeatureFlag:
 
     def test_disabled_skips_evidence_check(self, monkeypatch):
         """When TEST_EVIDENCE_ENABLED=0, tester pass without evidence proceeds normally."""
-        import scheduler as sched
+        import scheduler_legacy as sched
         sched.TEST_EVIDENCE_ENABLED = False
 
         report = _make_report()  # No test_evidence
@@ -333,7 +333,7 @@ class TestFeatureFlag:
 
     def test_enabled_enforces_evidence_check(self, monkeypatch):
         """When TEST_EVIDENCE_ENABLED=1, tester pass without evidence is rejected."""
-        import scheduler as sched
+        import scheduler_legacy as sched
         sched.TEST_EVIDENCE_ENABLED = True
 
         report = _make_report()  # No test_evidence
@@ -348,7 +348,7 @@ class TestTesterGuidance:
     """Test _generate_tester_guidance includes evidence instructions."""
 
     def test_guidance_includes_evidence_instructions(self):
-        import scheduler as sched
+        import scheduler_legacy as sched
         task = _make_task()
         guidance = sched._generate_tester_guidance(task)
 

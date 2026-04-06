@@ -192,8 +192,11 @@ python3 skills/task-dispatcher/scripts/trigger_scheduler.py --dry-run
 
 ```bash
 # 直接运行调度逻辑（在 web subsession 内使用）
-python3 skills/task-dispatcher/scripts/scheduler.py run [--parent SESSION_ID]
-python3 skills/task-dispatcher/scripts/scheduler.py dry-run
+python3 skills/task-dispatcher/scripts/scheduler.py run [--parent SESSION_ID] [--dry-run]
+python3 skills/task-dispatcher/scripts/scheduler.py record-spawn --task-id T --role R
+python3 skills/task-dispatcher/scripts/scheduler.py handle-completion --task-id T
+python3 skills/task-dispatcher/scripts/scheduler.py mark-done --task-id T
+python3 skills/task-dispatcher/scripts/scheduler.py mark-blocked --task-id T --reason R
 python3 skills/task-dispatcher/scripts/scheduler.py status
 ```
 
@@ -276,12 +279,14 @@ skills/task-dispatcher/
 ├── SKILL.md            # 本文件
 ├── scripts/
 │   ├── brain_manager.py        # CLI 主程序
-│   ├── scheduler.py            # 调度器核心逻辑
+│   ├── scheduler.py            # 调度器核心逻辑 (v2)
+│   ├── scheduler_legacy.py     # 调度器旧版本 (deprecated v1)
 │   ├── trigger_scheduler.py    # 调度触发器（固定 session + 换代机制）
 │   ├── review_connector.py     # Review 上下文加载
 │   ├── feishu_notify.py        # 飞书通知格式化 + 回复解析
 │   ├── test_brain_manager.py   # brain_manager 测试
-│   ├── test_scheduler.py       # 调度器+dispatcher 测试
+│   ├── test_trigger_scheduler.py  # dispatcher 触发器测试
+│   ├── test_scheduler_legacy.py   # 旧版调度器测试
 │   ├── test_feishu_notify.py   # 飞书通知模块测试
 │   └── test_templates.py       # 模板集成测试
 ├── templates/

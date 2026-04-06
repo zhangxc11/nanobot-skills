@@ -19,7 +19,7 @@ _SCRIPTS_DIR = Path(__file__).resolve().parent
 if str(_SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS_DIR))
 
-import scheduler
+import scheduler_legacy as scheduler
 import rule_loader
 
 

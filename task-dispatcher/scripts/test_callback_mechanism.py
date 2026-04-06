@@ -21,7 +21,7 @@ if str(_SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS_DIR))
 
 import brain_manager as bm
-import scheduler
+import scheduler_legacy as scheduler
 from trigger_scheduler import build_scheduler_prompt
 
 
@@ -181,7 +181,7 @@ def test_dispatcher_prompt_uses_spawn():
 
     # Must use spawn
     assert "spawn" in prompt
-    assert "task_prompt" in prompt
+    assert "dispatched" in prompt  # v2: dispatched list instead of task_prompt
     assert "Subagent Result Notification" in prompt
 
     # Must NOT reference old mechanisms

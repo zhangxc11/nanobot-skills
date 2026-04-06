@@ -1,20 +1,34 @@
 #!/usr/bin/env python3
 """
-test_scheduler.py - Tests for scheduler.py and trigger_scheduler.py dispatcher mechanism.
+test_scheduler_legacy.py - Tests for scheduler_legacy.py (deprecated v1 scheduler APIs).
 
 Tests cover:
-  - Priority sorting (P0 > P1 > P2, same priority by creation time)
-  - Dependency checking (blocked_by resolution)
   - Concurrency control (MAX_CONCURRENT_EXECUTING + MAX_DISPATCH_PER_RUN)
-  - Review level integration (determine_review_level used in worker prompt)
   - Quick task bypass (quick template skipped by scheduler)
   - Task category detection and verification guidance
-  - Dispatcher state management (load/save/increment)
-  - Session alive check
-  - Trigger logic (wake-up vs create new)
-  - Generation handoff (iteration cap)
+  - Spawn instruction generation
+  - Completed tasks / review follow-up
+  - Review level integration (determine_review_level used in worker prompt)
   - Scheduler run (dry-run and live)
   - Status reporting
+  - Circular dependency
+  - transition_task failure handling
+  - Timeout recovery
+  - Worker prompt fixes
+  - Report schema
+  - Parse worker report
+  - Make decision
+  - Execute decision
+  - Handle worker completion
+  - Generate worker prompt v2
+  - Legacy mode
+  - Handle completion CLI
+  - Design gate check
+  - Doc triplet check
+  - Doc retry escalation
+  - V6.1 role cross-check
+  - Assert audit completed
+  - V6.1 prompt generation
 """
 
 import json
@@ -119,137 +133,29 @@ def _write_dispatcher(brain_dir: Path, **kwargs) -> dict:
 
 
 # ══════════════════════════════════════════
-# Test: Priority Sorting
-# ══════════════════════════════════════════
-
-class TestPrioritySorting:
-    def test_p0_before_p1_before_p2(self):
-        import scheduler as sch
-        tasks = [
-            {"id": "T-1", "priority": "P2", "created": "2026-03-30T10:00:00"},
-            {"id": "T-2", "priority": "P0", "created": "2026-03-30T11:00:00"},
-            {"id": "T-3", "priority": "P1", "created": "2026-03-30T09:00:00"},
-        ]
-        sorted_tasks = sch.sort_by_priority(tasks)
-        assert [t["id"] for t in sorted_tasks] == ["T-2", "T-3", "T-1"]
-
-    def test_same_priority_by_creation_time(self):
-        import scheduler as sch
-        tasks = [
-            {"id": "T-B", "priority": "P1", "created": "2026-03-30T12:00:00"},
-            {"id": "T-A", "priority": "P1", "created": "2026-03-30T10:00:00"},
-            {"id": "T-C", "priority": "P1", "created": "2026-03-30T11:00:00"},
-        ]
-        sorted_tasks = sch.sort_by_priority(tasks)
-        assert [t["id"] for t in sorted_tasks] == ["T-A", "T-C", "T-B"]
-
-    def test_missing_priority_defaults_to_p2(self):
-        import scheduler as sch
-        tasks = [
-            {"id": "T-1", "priority": "P1", "created": "2026-03-30T10:00:00"},
-            {"id": "T-2", "created": "2026-03-30T09:00:00"},  # no priority
-        ]
-        sorted_tasks = sch.sort_by_priority(tasks)
-        assert sorted_tasks[0]["id"] == "T-1"  # P1 before default P2
-
-    def test_empty_list(self):
-        import scheduler as sch
-        assert sch.sort_by_priority([]) == []
-
-
-# ══════════════════════════════════════════
-# Test: Dependency Checking
-# ══════════════════════════════════════════
-
-class TestDependencyCheck:
-    def test_no_dependencies_is_ready(self):
-        import scheduler as sch
-        task = {"id": "T-1", "status": "queued"}
-        assert sch.check_dependency(task, {}) is True
-
-    def test_empty_blocked_by_is_ready(self):
-        import scheduler as sch
-        task = {"id": "T-1", "status": "queued", "blocked_by": []}
-        assert sch.check_dependency(task, {}) is True
-
-    def test_dependency_done_is_ready(self):
-        import scheduler as sch
-        task = {"id": "T-2", "blocked_by": ["T-1"]}
-        all_tasks = {"T-1": {"id": "T-1", "status": "done"}}
-        assert sch.check_dependency(task, all_tasks) is True
-
-    def test_dependency_cancelled_is_ready(self):
-        import scheduler as sch
-        task = {"id": "T-2", "blocked_by": ["T-1"]}
-        all_tasks = {"T-1": {"id": "T-1", "status": "cancelled"}}
-        assert sch.check_dependency(task, all_tasks) is True
-
-    def test_dependency_dropped_is_ready(self):
-        import scheduler as sch
-        task = {"id": "T-2", "blocked_by": ["T-1"]}
-        all_tasks = {"T-1": {"id": "T-1", "status": "dropped"}}
-        assert sch.check_dependency(task, all_tasks) is True
-
-    def test_dependency_executing_blocks(self):
-        import scheduler as sch
-        task = {"id": "T-2", "blocked_by": ["T-1"]}
-        all_tasks = {"T-1": {"id": "T-1", "status": "executing"}}
-        assert sch.check_dependency(task, all_tasks) is False
-
-    def test_dependency_queued_blocks(self):
-        import scheduler as sch
-        task = {"id": "T-2", "blocked_by": ["T-1"]}
-        all_tasks = {"T-1": {"id": "T-1", "status": "queued"}}
-        assert sch.check_dependency(task, all_tasks) is False
-
-    def test_dependency_not_found_blocks(self):
-        import scheduler as sch
-        task = {"id": "T-2", "blocked_by": ["T-nonexistent"]}
-        assert sch.check_dependency(task, {}) is False
-
-    def test_multiple_deps_all_done(self):
-        import scheduler as sch
-        task = {"id": "T-3", "blocked_by": ["T-1", "T-2"]}
-        all_tasks = {
-            "T-1": {"id": "T-1", "status": "done"},
-            "T-2": {"id": "T-2", "status": "done"},
-        }
-        assert sch.check_dependency(task, all_tasks) is True
-
-    def test_multiple_deps_one_pending(self):
-        import scheduler as sch
-        task = {"id": "T-3", "blocked_by": ["T-1", "T-2"]}
-        all_tasks = {
-            "T-1": {"id": "T-1", "status": "done"},
-            "T-2": {"id": "T-2", "status": "executing"},
-        }
-        assert sch.check_dependency(task, all_tasks) is False
-
-
-# ══════════════════════════════════════════
 # Test: Concurrency Control
 # ══════════════════════════════════════════
 
 class TestConcurrencyControl:
     def test_no_executing_full_slots(self):
-        import scheduler as sch
+        import scheduler_legacy as sch
         assert sch.determine_available_slots() == sch.MAX_CONCURRENT_EXECUTING
 
     def test_some_executing_reduces_slots(self):
-        import scheduler as sch
+        import scheduler_legacy as sch
         _create_task("T-20260330-001", status="executing")
         _create_task("T-20260330-002", status="executing")
         assert sch.determine_available_slots() == sch.MAX_CONCURRENT_EXECUTING - 2
 
     def test_max_executing_zero_slots(self):
-        import scheduler as sch
+        import scheduler_legacy as sch
         for i in range(sch.MAX_CONCURRENT_EXECUTING):
             _create_task(f"T-20260330-{i+1:03d}", status="executing")
         assert sch.determine_available_slots() == 0
 
     def test_per_run_cap_limits_dispatch(self):
         """Even with many slots, per-run cap limits dispatch count."""
-        import scheduler as sch
+        import scheduler_legacy as sch
         # Create more queued tasks than MAX_DISPATCH_PER_RUN
         for i in range(5):
             _create_task(f"T-20260330-{i+1:03d}", status="queued", priority="P1")
@@ -261,7 +167,7 @@ class TestConcurrencyControl:
 
     def test_global_limit_overrides_per_run(self):
         """If only 1 global slot, dispatch at most 1 even if per-run cap is 3."""
-        import scheduler as sch
+        import scheduler_legacy as sch
         # Fill up to MAX-1 executing
         for i in range(sch.MAX_CONCURRENT_EXECUTING - 1):
             _create_task(f"T-20260330-{i+1:03d}", status="executing")
@@ -280,7 +186,7 @@ class TestConcurrencyControl:
 
 class TestQuickTaskBypass:
     def test_quick_tasks_skipped(self):
-        import scheduler as sch
+        import scheduler_legacy as sch
         _create_task("T-20260330-001", status="queued", template="quick")
         _create_task("T-20260330-002", status="queued", template="standard-dev")
 
@@ -290,7 +196,7 @@ class TestQuickTaskBypass:
         assert "T-20260330-002" in dispatched_ids
 
     def test_is_quick_task_detection(self):
-        import scheduler as sch
+        import scheduler_legacy as sch
         assert sch.is_quick_task({"workgroup": {"template": "quick"}}) is True
         assert sch.is_quick_task({"workgroup": {"template": "standard-dev"}}) is False
         assert sch.is_quick_task({"template": "quick"}) is True
@@ -303,32 +209,32 @@ class TestQuickTaskBypass:
 
 class TestTaskCategoryDetection:
     def test_web_frontend(self):
-        import scheduler as sch
+        import scheduler_legacy as sch
         task = {"title": "修复 Dashboard 页面 UI 问题", "description": ""}
         assert sch.detect_task_category(task) == "web_frontend"
 
     def test_feishu_integration(self):
-        import scheduler as sch
+        import scheduler_legacy as sch
         task = {"title": "飞书消息卡片优化", "description": ""}
         assert sch.detect_task_category(task) == "feishu_integration"
 
     def test_api_interface(self):
-        import scheduler as sch
+        import scheduler_legacy as sch
         task = {"title": "新增 REST API 接口", "description": ""}
         assert sch.detect_task_category(task) == "api_interface"
 
     def test_data_processing(self):
-        import scheduler as sch
+        import scheduler_legacy as sch
         task = {"title": "数据清洗 pipeline", "description": ""}
         assert sch.detect_task_category(task) == "data_processing"
 
     def test_default_backend(self):
-        import scheduler as sch
+        import scheduler_legacy as sch
         task = {"title": "优化缓存策略", "description": ""}
         assert sch.detect_task_category(task) == "backend_script"
 
     def test_description_also_checked(self):
-        import scheduler as sch
+        import scheduler_legacy as sch
         task = {"title": "新功能", "description": "需要修改前端 html 页面"}
         assert sch.detect_task_category(task) == "web_frontend"
 
@@ -339,28 +245,28 @@ class TestTaskCategoryDetection:
 
 class TestReviewLevelIntegration:
     def test_worker_prompt_includes_review_level(self, monkeypatch):
-        import scheduler as sch
+        import scheduler_legacy as sch
         monkeypatch.setattr(sch, "LEGACY_MODE", True)
         task = _create_task("T-20260330-001", template="standard-dev", priority="P1")
         prompt = sch.generate_worker_prompt(task)
         assert "Review 级别" in prompt
 
     def test_quick_task_l0(self, monkeypatch):
-        import scheduler as sch
+        import scheduler_legacy as sch
         monkeypatch.setattr(sch, "LEGACY_MODE", True)
         task = _create_task("T-20260330-001", template="quick")
         prompt = sch.generate_worker_prompt(task)
         assert "L0" in prompt
 
     def test_p0_task_l3(self, monkeypatch):
-        import scheduler as sch
+        import scheduler_legacy as sch
         monkeypatch.setattr(sch, "LEGACY_MODE", True)
         task = _create_task("T-20260330-001", template="standard-dev", priority="P0")
         prompt = sch.generate_worker_prompt(task)
         assert "L3" in prompt
 
     def test_verification_guidance_in_prompt(self, monkeypatch):
-        import scheduler as sch
+        import scheduler_legacy as sch
         monkeypatch.setattr(sch, "LEGACY_MODE", True)
         task = _create_task("T-20260330-001", template="standard-dev",
                             title="修复 Dashboard 页面", description="前端 bug")
@@ -369,7 +275,7 @@ class TestReviewLevelIntegration:
         assert "截图" in prompt
 
     def test_backend_verification_in_prompt(self, monkeypatch):
-        import scheduler as sch
+        import scheduler_legacy as sch
         monkeypatch.setattr(sch, "LEGACY_MODE", True)
         task = _create_task("T-20260330-001", template="standard-dev",
                             title="优化缓存逻辑")
@@ -384,7 +290,7 @@ class TestReviewLevelIntegration:
 
 class TestSpawnInstruction:
     def test_spawn_instruction_fields(self):
-        import scheduler as sch
+        import scheduler_legacy as sch
         task = _create_task("T-20260330-001")
         instr = sch.generate_spawn_instruction(task, parent_session_id="web_123")
         assert instr["task_id"] == "T-20260330-001"
@@ -399,7 +305,7 @@ class TestSpawnInstruction:
         assert "dispatcher_session_id" not in instr
 
     def test_spawn_instruction_prompt_content(self):
-        import scheduler as sch
+        import scheduler_legacy as sch
         task = _create_task("T-20260330-001")
         instr = sch.generate_spawn_instruction(task, parent_session_id="webchat_dispatch_123_456")
         # task_prompt should contain task details
@@ -415,7 +321,7 @@ class TestSpawnInstruction:
 
 class TestSchedulerRun:
     def test_dry_run_no_state_change(self):
-        import scheduler as sch
+        import scheduler_legacy as sch
         import brain_manager as bm
         _create_task("T-20260330-001", status="queued")
 
@@ -429,7 +335,7 @@ class TestSchedulerRun:
         assert task["status"] == "queued"
 
     def test_live_run_updates_status(self):
-        import scheduler as sch
+        import scheduler_legacy as sch
         import brain_manager as bm
         _create_task("T-20260330-001", status="queued")
 
@@ -443,13 +349,13 @@ class TestSchedulerRun:
         assert task["status"] == "executing"
 
     def test_no_queued_tasks_empty_dispatch(self):
-        import scheduler as sch
+        import scheduler_legacy as sch
         result = sch.run_scheduler(dry_run=True)
         assert result["ok"]
         assert len(result["spawn_instructions"]) == 0
 
     def test_dependency_blocks_dispatch(self):
-        import scheduler as sch
+        import scheduler_legacy as sch
         _create_task("T-20260330-001", status="executing")
         _create_task("T-20260330-002", status="queued", blocked_by=["T-20260330-001"])
 
@@ -458,7 +364,7 @@ class TestSchedulerRun:
         assert result["report"]["summary"]["skipped_dependency"] == 1
 
     def test_priority_ordering_in_dispatch(self):
-        import scheduler as sch
+        import scheduler_legacy as sch
         _create_task("T-20260330-001", status="queued", priority="P2",
                      created="2026-03-30T10:00:00+08:00")
         _create_task("T-20260330-002", status="queued", priority="P0",
@@ -471,7 +377,7 @@ class TestSchedulerRun:
         assert ids == ["T-20260330-002", "T-20260330-003", "T-20260330-001"]
 
     def test_report_structure(self):
-        import scheduler as sch
+        import scheduler_legacy as sch
         _create_task("T-20260330-001", status="queued")
         result = sch.run_scheduler(dry_run=True)
         report = result["report"]
@@ -489,13 +395,13 @@ class TestSchedulerRun:
 
 class TestStatus:
     def test_status_empty(self):
-        import scheduler as sch
+        import scheduler_legacy as sch
         result = sch.get_status()
         assert result["ok"]
         assert result["data"]["available_slots"] == sch.MAX_CONCURRENT_EXECUTING
 
     def test_status_with_tasks(self):
-        import scheduler as sch
+        import scheduler_legacy as sch
         _create_task("T-20260330-001", status="queued", priority="P0")
         _create_task("T-20260330-002", status="executing")
 
@@ -508,726 +414,17 @@ class TestStatus:
 
 
 # ══════════════════════════════════════════
-# Test: Dispatcher State Management
-# ══════════════════════════════════════════
-
-class TestDispatcherState:
-    def test_load_dispatcher_no_file(self):
-        import trigger_scheduler as ts
-        assert ts.load_dispatcher() is None
-
-    def test_save_and_load_dispatcher(self, isolated_brain):
-        import trigger_scheduler as ts
-        data = {
-            "session_id": "webchat_dispatch_123_456",
-            "session_key": "webchat:dispatch_123_456",
-            "created_at": "2026-03-31T00:00:00+08:00",
-            "iteration_count": 5,
-            "last_triggered_at": "2026-03-31T00:25:00+08:00",
-        }
-        ts.save_dispatcher(data)
-
-        loaded = ts.load_dispatcher()
-        assert loaded is not None
-        assert loaded["session_id"] == "webchat_dispatch_123_456"
-        assert loaded["session_key"] == "webchat:dispatch_123_456"
-        assert loaded["iteration_count"] == 5
-
-    def test_load_dispatcher_corrupted(self, isolated_brain):
-        import trigger_scheduler as ts
-        ts.DISPATCHER_FILE.parent.mkdir(parents=True, exist_ok=True)
-        ts.DISPATCHER_FILE.write_text("not json at all")
-        assert ts.load_dispatcher() is None
-
-    def test_load_dispatcher_missing_fields(self, isolated_brain):
-        import trigger_scheduler as ts
-        ts.DISPATCHER_FILE.parent.mkdir(parents=True, exist_ok=True)
-        ts.DISPATCHER_FILE.write_text(json.dumps({"session_id": "", "session_key": ""}))
-        assert ts.load_dispatcher() is None
-
-    def test_increment_iteration(self, isolated_brain):
-        import trigger_scheduler as ts
-        data = _write_dispatcher(isolated_brain, iteration_count=10)
-        updated = ts.increment_iteration(data)
-        assert updated["iteration_count"] == 11
-        assert "last_triggered_at" in updated
-
-        # Verify persisted
-        reloaded = ts.load_dispatcher()
-        assert reloaded["iteration_count"] == 11
-
-    def test_save_dispatcher_atomic(self, isolated_brain):
-        """Save should be atomic (write to tmp then rename)."""
-        import trigger_scheduler as ts
-        data = {
-            "session_id": "webchat_dispatch_test",
-            "session_key": "webchat:dispatch_test",
-            "created_at": ts._now_iso(),
-            "iteration_count": 0,
-        }
-        ts.save_dispatcher(data)
-
-        # tmp file should not exist after save
-        tmp_file = ts.DISPATCHER_FILE.with_suffix(".tmp")
-        assert not tmp_file.exists()
-        assert ts.DISPATCHER_FILE.exists()
-
-    def test_save_dispatcher_creates_parent_dirs(self, tmp_path):
-        import trigger_scheduler as ts
-        nested_file = tmp_path / "deep" / "nested" / "dispatcher.json"
-        original = ts.DISPATCHER_FILE
-        ts.DISPATCHER_FILE = nested_file
-        try:
-            data = {
-                "session_id": "test",
-                "session_key": "webchat:test",
-                "created_at": ts._now_iso(),
-                "iteration_count": 0,
-            }
-            ts.save_dispatcher(data)
-            assert nested_file.exists()
-            loaded = json.loads(nested_file.read_text())
-            assert loaded["session_id"] == "test"
-        finally:
-            ts.DISPATCHER_FILE = original
-
-
-# ══════════════════════════════════════════
-# Test: Session Alive Check
-# ══════════════════════════════════════════
-
-class TestSessionAliveCheck:
-    def test_session_alive_when_recent(self):
-        """Mock the API to return a recently active session."""
-        import trigger_scheduler as ts
-
-        recent_time = datetime.now().astimezone().isoformat()
-        mock_sessions = [
-            {
-                "id": "webchat_dispatch_123_456",
-                "lastActiveAt": recent_time,
-                "messageCount": 10,
-            }
-        ]
-
-        mock_response = mock.MagicMock()
-        mock_response.status = 200
-        mock_response.read.return_value = json.dumps({"sessions": mock_sessions}).encode()
-        mock_response.__enter__ = mock.MagicMock(return_value=mock_response)
-        mock_response.__exit__ = mock.MagicMock(return_value=False)
-
-        with mock.patch("trigger_scheduler.urlopen", return_value=mock_response):
-            result = ts.check_session_alive("webchat_dispatch_123_456")
-            assert result["alive"] is True
-            assert result["exists"] is True
-            assert result["stale"] is False
-
-    def test_session_stale_when_old(self):
-        """Session with old lastActiveAt should be considered stale."""
-        import trigger_scheduler as ts
-
-        old_time = (datetime.now().astimezone() - timedelta(hours=2)).isoformat()
-        mock_sessions = [
-            {
-                "id": "webchat_dispatch_123_456",
-                "lastActiveAt": old_time,
-                "messageCount": 50,
-            }
-        ]
-
-        mock_response = mock.MagicMock()
-        mock_response.status = 200
-        mock_response.read.return_value = json.dumps({"sessions": mock_sessions}).encode()
-        mock_response.__enter__ = mock.MagicMock(return_value=mock_response)
-        mock_response.__exit__ = mock.MagicMock(return_value=False)
-
-        with mock.patch("trigger_scheduler.urlopen", return_value=mock_response):
-            result = ts.check_session_alive("webchat_dispatch_123_456")
-            assert result["alive"] is False
-            assert result["exists"] is True
-            assert result["stale"] is True
-
-    def test_session_not_found(self):
-        """Session not in API response should be considered dead."""
-        import trigger_scheduler as ts
-
-        mock_response = mock.MagicMock()
-        mock_response.status = 200
-        mock_response.read.return_value = json.dumps({"sessions": []}).encode()
-        mock_response.__enter__ = mock.MagicMock(return_value=mock_response)
-        mock_response.__exit__ = mock.MagicMock(return_value=False)
-
-        with mock.patch("trigger_scheduler.urlopen", return_value=mock_response):
-            result = ts.check_session_alive("webchat_dispatch_nonexistent")
-            assert result["alive"] is False
-            assert result["exists"] is False
-
-    def test_session_check_api_error(self):
-        """API error should return not alive."""
-        import trigger_scheduler as ts
-
-        with mock.patch("trigger_scheduler.urlopen", side_effect=Exception("connection refused")):
-            result = ts.check_session_alive("webchat_dispatch_123_456")
-            assert result["alive"] is False
-            assert "error" in result
-
-
-# ══════════════════════════════════════════
-# Test: Prompt Generation
-# ══════════════════════════════════════════
-
-class TestPromptGeneration:
-    def test_wake_up_prompt_has_decision_tree(self):
-        import trigger_scheduler as ts
-        prompt = ts.build_scheduler_prompt(dry_run=False, is_wake_up=True)
-        assert "⏰ 调度器唤醒" in prompt
-        assert "scheduler.py run" in prompt
-        # Should contain proactive handling guidance
-        assert "迭代用满" in prompt or "reached the maximum" in prompt
-        assert "follow_up" in prompt
-        assert "handle-completion" in prompt
-        assert "项目经理" in prompt
-
-    def test_full_prompt_has_all_sections(self):
-        import trigger_scheduler as ts
-        prompt = ts.build_scheduler_prompt(dry_run=False, is_wake_up=False)
-        assert "Step 1" in prompt
-        assert "Step 2" in prompt
-        assert "Step 3" in prompt
-        assert "Step 4" in prompt
-        assert "固定 session 模式" in prompt
-        assert "后续唤醒" in prompt
-        # New: proactive project manager mindset
-        assert "项目经理" in prompt
-        assert "决策树" in prompt
-
-    def test_full_prompt_has_iteration_exhaustion_handling(self):
-        """Full prompt should have guidance for iteration-exhausted workers."""
-        import trigger_scheduler as ts
-        prompt = ts.build_scheduler_prompt(dry_run=False, is_wake_up=False)
-        assert "迭代用满" in prompt or "reached the maximum" in prompt
-        assert "follow_up" in prompt
-        # Should mention max follow_up limit
-        assert str(ts.MAX_FOLLOW_UP_ON_EXHAUSTION) in prompt
-
-    def test_full_prompt_has_no_report_handling(self):
-        """Full prompt should handle case when worker has no report."""
-        import trigger_scheduler as ts
-        prompt = ts.build_scheduler_prompt(dry_run=False, is_wake_up=False)
-        assert "no worker report" in prompt or "无报告" in prompt
-        assert "补写报告" in prompt or "补报告" in prompt
-
-    def test_full_prompt_has_partial_handling(self):
-        """Full prompt should handle partial verdicts proactively."""
-        import trigger_scheduler as ts
-        prompt = ts.build_scheduler_prompt(dry_run=False, is_wake_up=False)
-        assert "partial" in prompt
-
-    def test_full_prompt_discourages_blind_blocked(self):
-        """Full prompt should discourage blindly accepting mark_blocked."""
-        import trigger_scheduler as ts
-        prompt = ts.build_scheduler_prompt(dry_run=False, is_wake_up=False)
-        assert "不要无脑接受" in prompt or "不要直接接受" in prompt
-
-    def test_dry_run_flag_in_prompt(self):
-        import trigger_scheduler as ts
-        prompt = ts.build_scheduler_prompt(dry_run=True, is_wake_up=True)
-        assert "dry-run" in prompt
-
-    def test_parent_in_prompt(self):
-        import trigger_scheduler as ts
-        prompt = ts.build_scheduler_prompt(parent_session_id="feishu.ST.123", is_wake_up=True)
-        assert "feishu.ST.123" in prompt
-
-    def test_no_lock_references_in_prompt(self):
-        """The new prompt should not reference lock acquire/release."""
-        import trigger_scheduler as ts
-        full_prompt = ts.build_scheduler_prompt(dry_run=False, is_wake_up=False)
-        wake_prompt = ts.build_scheduler_prompt(dry_run=False, is_wake_up=True)
-        for prompt in [full_prompt, wake_prompt]:
-            assert "release_lock" not in prompt
-            assert "acquire_lock" not in prompt
-            assert "scheduler.lock" not in prompt
-
-    def test_max_follow_up_constant_exists(self):
-        """MAX_FOLLOW_UP_ON_EXHAUSTION constant should be defined."""
-        import trigger_scheduler as ts
-        assert hasattr(ts, "MAX_FOLLOW_UP_ON_EXHAUSTION")
-        assert isinstance(ts.MAX_FOLLOW_UP_ON_EXHAUSTION, int)
-        assert ts.MAX_FOLLOW_UP_ON_EXHAUSTION >= 1
-
-
-# ══════════════════════════════════════════
-# Test: Trigger Logic
-# ══════════════════════════════════════════
-
-class TestTriggerLogic:
-    def test_trigger_no_dispatcher_creates_new(self, isolated_brain):
-        """When no dispatcher.json exists, should create new session."""
-        import trigger_scheduler as ts
-
-        with mock.patch.object(ts, "check_webchat_health", return_value=True), \
-             mock.patch.object(ts, "create_dispatcher_session") as mock_create:
-            mock_create.return_value = {
-                "ok": True,
-                "action": "created_new",
-                "session_key": "webchat:dispatch_test_123",
-                "session_id": "webchat_dispatch_test_123",
-            }
-            result = ts.trigger_scheduler()
-            assert result["ok"]
-            mock_create.assert_called_once()
-
-    def test_trigger_alive_session_sends_wake_up(self, isolated_brain):
-        """When dispatcher exists and session is alive, should send wake-up."""
-        import trigger_scheduler as ts
-
-        _write_dispatcher(isolated_brain, iteration_count=5)
-
-        with mock.patch.object(ts, "check_webchat_health", return_value=True), \
-             mock.patch.object(ts, "check_session_alive") as mock_alive, \
-             mock.patch.object(ts, "send_to_session_async") as mock_send:
-            mock_alive.return_value = {"alive": True, "exists": True, "stale": False}
-            mock_send.return_value = {"ok": True, "started": True, "pid": 12345}
-
-            result = ts.trigger_scheduler()
-            assert result["ok"]
-            assert result["action"] == "wake_up"
-            assert result["iteration_count"] == 6  # incremented
-            mock_send.assert_called_once()
-
-    def test_trigger_stale_session_creates_new(self, isolated_brain):
-        """When dispatcher session is stale, should create new one."""
-        import trigger_scheduler as ts
-
-        old_dispatcher = _write_dispatcher(isolated_brain, session_id="webchat_dispatch_old",
-                                           iteration_count=10)
-
-        with mock.patch.object(ts, "check_webchat_health", return_value=True), \
-             mock.patch.object(ts, "check_session_alive") as mock_alive, \
-             mock.patch.object(ts, "create_dispatcher_session") as mock_create:
-            mock_alive.return_value = {"alive": False, "exists": True, "stale": True}
-            mock_create.return_value = {
-                "ok": True,
-                "action": "created_new",
-                "session_key": "webchat:dispatch_new_789",
-                "session_id": "webchat_dispatch_new_789",
-            }
-
-            result = ts.trigger_scheduler()
-            assert result["ok"]
-            assert result.get("previous_session_id") == "webchat_dispatch_old"
-            assert result.get("previous_reason") == "stale_or_dead"
-            mock_create.assert_called_once()
-
-    def test_trigger_webchat_down(self):
-        """When web-chat is down, should return error."""
-        import trigger_scheduler as ts
-
-        with mock.patch.object(ts, "check_webchat_health", return_value=False):
-            result = ts.trigger_scheduler()
-            assert result["ok"] is False
-            assert "not running" in result["error"]
-
-    def test_trigger_iteration_cap_creates_successor(self, isolated_brain):
-        """When iteration count exceeds MAX_ITERATIONS, should create successor."""
-        import trigger_scheduler as ts
-
-        _write_dispatcher(isolated_brain, iteration_count=ts.MAX_ITERATIONS)
-
-        with mock.patch.object(ts, "check_webchat_health", return_value=True), \
-             mock.patch.object(ts, "create_dispatcher_session") as mock_create:
-            mock_create.return_value = {
-                "ok": True,
-                "action": "created_new",
-                "session_key": "webchat:dispatch_new_999",
-                "session_id": "webchat_dispatch_new_999",
-            }
-
-            result = ts.trigger_scheduler()
-            assert result["ok"]
-            assert result["action"] == "generation_handoff"
-            assert result["previous_iterations"] == ts.MAX_ITERATIONS
-            mock_create.assert_called_once()
-
-    def test_trigger_send_failure_creates_new(self, isolated_brain):
-        """When send to existing session fails, should create new one."""
-        import trigger_scheduler as ts
-
-        _write_dispatcher(isolated_brain, iteration_count=5)
-
-        with mock.patch.object(ts, "check_webchat_health", return_value=True), \
-             mock.patch.object(ts, "check_session_alive") as mock_alive, \
-             mock.patch.object(ts, "send_to_session_async") as mock_send, \
-             mock.patch.object(ts, "create_dispatcher_session") as mock_create:
-            mock_alive.return_value = {"alive": True, "exists": True, "stale": False}
-            mock_send.return_value = {"ok": False, "error": "connection refused"}
-            mock_create.return_value = {
-                "ok": True,
-                "action": "created_new",
-                "session_key": "webchat:dispatch_fallback",
-                "session_id": "webchat_dispatch_fallback",
-            }
-
-            result = ts.trigger_scheduler()
-            assert result["ok"]
-            mock_create.assert_called_once()
-
-
-# ══════════════════════════════════════════
-# Test: Generation Handoff
-# ══════════════════════════════════════════
-
-class TestGenerationHandoff:
-    def test_handoff_at_exact_cap(self, isolated_brain):
-        """Handoff should trigger at exactly MAX_ITERATIONS."""
-        import trigger_scheduler as ts
-
-        _write_dispatcher(isolated_brain, iteration_count=ts.MAX_ITERATIONS)
-
-        with mock.patch.object(ts, "check_webchat_health", return_value=True), \
-             mock.patch.object(ts, "create_dispatcher_session") as mock_create:
-            mock_create.return_value = {"ok": True, "action": "created_new",
-                                        "session_key": "new", "session_id": "new"}
-            result = ts.trigger_scheduler()
-            assert result["action"] == "generation_handoff"
-
-    def test_no_handoff_below_cap(self, isolated_brain):
-        """No handoff when below MAX_ITERATIONS."""
-        import trigger_scheduler as ts
-
-        _write_dispatcher(isolated_brain, iteration_count=ts.MAX_ITERATIONS - 1)
-
-        with mock.patch.object(ts, "check_webchat_health", return_value=True), \
-             mock.patch.object(ts, "check_session_alive") as mock_alive, \
-             mock.patch.object(ts, "send_to_session_async") as mock_send:
-            mock_alive.return_value = {"alive": True, "exists": True, "stale": False}
-            mock_send.return_value = {"ok": True, "started": True, "pid": 123}
-
-            result = ts.trigger_scheduler()
-            assert result["action"] == "wake_up"
-
-    def test_handoff_updates_dispatcher(self, isolated_brain):
-        """After handoff, dispatcher.json should have new session info."""
-        import trigger_scheduler as ts
-
-        _write_dispatcher(isolated_brain, session_id="old_session",
-                          iteration_count=ts.MAX_ITERATIONS)
-
-        new_dispatcher = {
-            "session_id": "webchat_dispatch_new",
-            "session_key": "webchat:dispatch_new",
-            "created_at": ts._now_iso(),
-            "iteration_count": 1,
-            "last_triggered_at": ts._now_iso(),
-        }
-
-        def fake_create(**kwargs):
-            ts.save_dispatcher(new_dispatcher)
-            return {"ok": True, "action": "created_new",
-                    "session_key": "webchat:dispatch_new",
-                    "session_id": "webchat_dispatch_new",
-                    "dispatcher": new_dispatcher}
-
-        with mock.patch.object(ts, "check_webchat_health", return_value=True), \
-             mock.patch.object(ts, "create_dispatcher_session", side_effect=fake_create):
-            ts.trigger_scheduler()
-
-        reloaded = ts.load_dispatcher()
-        assert reloaded["session_id"] == "webchat_dispatch_new"
-        assert reloaded["iteration_count"] == 1
-
-
-# ══════════════════════════════════════════
-# Test: Dispatcher Status
-# ══════════════════════════════════════════
-
-class TestDispatcherStatus:
-    def test_status_no_dispatcher(self):
-        import trigger_scheduler as ts
-        result = ts.get_dispatcher_status()
-        assert result["ok"]
-        assert result["status"] == "no_dispatcher"
-        assert result["dispatcher"] is None
-
-    def test_status_active_dispatcher(self, isolated_brain):
-        import trigger_scheduler as ts
-        _write_dispatcher(isolated_brain, iteration_count=42)
-
-        with mock.patch.object(ts, "check_session_alive") as mock_alive:
-            mock_alive.return_value = {"alive": True, "exists": True, "stale": False}
-            result = ts.get_dispatcher_status()
-            assert result["ok"]
-            assert result["status"] == "active"
-            assert result["dispatcher"]["iteration_count"] == 42
-            assert result["iterations_remaining"] == ts.MAX_ITERATIONS - 42
-
-    def test_status_stale_dispatcher(self, isolated_brain):
-        import trigger_scheduler as ts
-        _write_dispatcher(isolated_brain, iteration_count=100)
-
-        with mock.patch.object(ts, "check_session_alive") as mock_alive:
-            mock_alive.return_value = {"alive": False, "exists": True, "stale": True}
-            result = ts.get_dispatcher_status()
-            assert result["ok"]
-            assert result["status"] == "stale"
-
-
-# ══════════════════════════════════════════
-# Test: Iteration Limit (Dual Detection)
-# ══════════════════════════════════════════
-
-class TestCheckIterationLimit:
-    def test_below_both_thresholds(self):
-        import trigger_scheduler as ts
-        dispatcher = {"iteration_count": 100}
-        status = {"message_count": 500}
-        assert ts.check_iteration_limit(dispatcher, status) is False
-
-    def test_trigger_count_at_cap(self):
-        import trigger_scheduler as ts
-        dispatcher = {"iteration_count": ts.MAX_ITERATIONS}
-        status = {"message_count": 100}
-        assert ts.check_iteration_limit(dispatcher, status) is True
-
-    def test_trigger_count_over_cap(self):
-        import trigger_scheduler as ts
-        dispatcher = {"iteration_count": ts.MAX_ITERATIONS + 10}
-        assert ts.check_iteration_limit(dispatcher) is True
-
-    def test_message_count_at_cap(self):
-        import trigger_scheduler as ts
-        dispatcher = {"iteration_count": 100}
-        status = {"message_count": ts.MESSAGE_COUNT_CAP}
-        assert ts.check_iteration_limit(dispatcher, status) is True
-
-    def test_message_count_over_cap(self):
-        import trigger_scheduler as ts
-        dispatcher = {"iteration_count": 100}
-        status = {"message_count": ts.MESSAGE_COUNT_CAP + 500}
-        assert ts.check_iteration_limit(dispatcher, status) is True
-
-    def test_no_status_only_checks_trigger_count(self):
-        """Without session_status, only trigger_count is checked."""
-        import trigger_scheduler as ts
-        dispatcher = {"iteration_count": 100}
-        assert ts.check_iteration_limit(dispatcher, session_status=None) is False
-
-    def test_no_status_trigger_at_cap(self):
-        import trigger_scheduler as ts
-        dispatcher = {"iteration_count": ts.MAX_ITERATIONS}
-        assert ts.check_iteration_limit(dispatcher, session_status=None) is True
-
-    def test_missing_iteration_count_defaults_zero(self):
-        import trigger_scheduler as ts
-        dispatcher = {}
-        status = {"message_count": 100}
-        assert ts.check_iteration_limit(dispatcher, status) is False
-
-
-class TestMessageCountHandoff:
-    def test_message_count_triggers_handoff(self, isolated_brain):
-        """When message_count exceeds cap but trigger_count is low, should still handoff."""
-        import trigger_scheduler as ts
-
-        _write_dispatcher(isolated_brain, iteration_count=50,
-                          session_id="webchat_dispatch_old")
-        recent_time = (datetime.now().astimezone() - timedelta(minutes=10)).isoformat()
-
-        with mock.patch.object(ts, "check_webchat_health", return_value=True), \
-             mock.patch.object(ts, "check_session_alive") as mock_alive, \
-             mock.patch.object(ts, "create_dispatcher_session") as mock_create:
-            mock_alive.return_value = {
-                "alive": True, "exists": True, "stale": False,
-                "last_active": recent_time,
-                "message_count": ts.MESSAGE_COUNT_CAP + 100,
-            }
-            mock_create.return_value = {
-                "ok": True, "action": "created_new",
-                "session_key": "webchat:dispatch_new",
-                "session_id": "webchat_dispatch_new",
-            }
-
-            result = ts.trigger_scheduler()
-            assert result["ok"]
-            assert result["action"] == "generation_handoff"
-            assert result["handoff_reason"] == "message_count_cap"
-            mock_create.assert_called_once()
-
-
-class TestGenerationField:
-    def test_first_session_generation_1(self, isolated_brain):
-        """First dispatcher session should have generation=1."""
-        import trigger_scheduler as ts
-
-        with mock.patch("trigger_scheduler.send_to_session_async") as mock_send:
-            mock_send.return_value = {"ok": True, "started": True, "pid": 12345}
-
-            result = ts.create_dispatcher_session()
-            assert result["ok"]
-
-            dispatcher = ts.load_dispatcher()
-            assert dispatcher["generation"] == 1
-            assert dispatcher["previous_session_id"] == ""
-            assert dispatcher["version"] == 3
-
-    def test_successor_increments_generation(self, isolated_brain):
-        """Successor session should increment generation."""
-        import trigger_scheduler as ts
-
-        # Write initial dispatcher with generation=3
-        _write_dispatcher(isolated_brain, generation=3,
-                          session_id="webchat_dispatch_old")
-
-        with mock.patch("trigger_scheduler.send_to_session_async") as mock_send:
-            mock_send.return_value = {"ok": True, "started": True, "pid": 12345}
-
-            result = ts.create_dispatcher_session()
-            assert result["ok"]
-
-            dispatcher = ts.load_dispatcher()
-            assert dispatcher["generation"] == 4
-            assert dispatcher["previous_session_id"] == "webchat_dispatch_old"
-
-    def test_session_key_has_random_suffix(self, isolated_brain):
-        """Session key should include a random suffix for uniqueness."""
-        import trigger_scheduler as ts
-
-        with mock.patch("trigger_scheduler.send_to_session_async") as mock_send:
-            mock_send.return_value = {"ok": True, "started": True, "pid": 12345}
-
-            result = ts.create_dispatcher_session()
-            assert result["ok"]
-            # Key format: webchat:dispatch_{chat_id}_{ts}_{rand}
-            parts = result["session_key"].split("_")
-            assert len(parts) >= 4  # at least: webchat:dispatch, chat_id, ts, rand
-
-
-# ══════════════════════════════════════════
-# Test: Concurrency Protection (should_skip_wakeup)
-# ══════════════════════════════════════════
-
-class TestShouldSkipWakeup:
-    def test_skip_when_recently_active(self):
-        """Session active 1 minute ago should be skipped."""
-        import trigger_scheduler as ts
-        recent_time = (datetime.now().astimezone() - timedelta(seconds=60)).isoformat()
-        status = {"last_active": recent_time}
-        assert ts.should_skip_wakeup(status) is True
-
-    def test_no_skip_when_idle(self):
-        """Session active 10 minutes ago should not be skipped."""
-        import trigger_scheduler as ts
-        old_time = (datetime.now().astimezone() - timedelta(minutes=10)).isoformat()
-        status = {"last_active": old_time}
-        assert ts.should_skip_wakeup(status) is False
-
-    def test_no_skip_when_no_last_active(self):
-        """No last_active should not skip."""
-        import trigger_scheduler as ts
-        assert ts.should_skip_wakeup({}) is False
-        assert ts.should_skip_wakeup({"last_active": ""}) is False
-
-    def test_no_skip_when_invalid_timestamp(self):
-        """Invalid timestamp should not skip (fail-open)."""
-        import trigger_scheduler as ts
-        assert ts.should_skip_wakeup({"last_active": "not-a-date"}) is False
-
-    def test_boundary_at_5_minutes(self):
-        """Session active exactly at boundary should not be skipped (>= 300s = not busy)."""
-        import trigger_scheduler as ts
-        boundary_time = (datetime.now().astimezone() - timedelta(seconds=301)).isoformat()
-        status = {"last_active": boundary_time}
-        assert ts.should_skip_wakeup(status) is False
-
-    def test_skip_at_just_under_boundary(self):
-        """Session active just under 5 minutes should be skipped."""
-        import trigger_scheduler as ts
-        recent_time = (datetime.now().astimezone() - timedelta(seconds=299)).isoformat()
-        status = {"last_active": recent_time}
-        assert ts.should_skip_wakeup(status) is True
-
-
-class TestTriggerSkipsBusy:
-    def test_trigger_skips_busy_session(self, isolated_brain):
-        """When session is alive but busy, should skip wake-up."""
-        import trigger_scheduler as ts
-
-        _write_dispatcher(isolated_brain, iteration_count=5)
-        recent_time = (datetime.now().astimezone() - timedelta(seconds=60)).isoformat()
-
-        with mock.patch.object(ts, "check_webchat_health", return_value=True), \
-             mock.patch.object(ts, "check_session_alive") as mock_alive:
-            mock_alive.return_value = {
-                "alive": True, "exists": True, "stale": False,
-                "last_active": recent_time, "message_count": 10,
-            }
-
-            result = ts.trigger_scheduler()
-            assert result["ok"]
-            assert result["action"] == "skipped_busy"
-            assert "still executing" in result["reason"]
-
-    def test_trigger_wakes_idle_session(self, isolated_brain):
-        """When session is alive and idle, should send wake-up."""
-        import trigger_scheduler as ts
-
-        _write_dispatcher(isolated_brain, iteration_count=5)
-        old_time = (datetime.now().astimezone() - timedelta(minutes=10)).isoformat()
-
-        with mock.patch.object(ts, "check_webchat_health", return_value=True), \
-             mock.patch.object(ts, "check_session_alive") as mock_alive, \
-             mock.patch.object(ts, "send_to_session_async") as mock_send:
-            mock_alive.return_value = {
-                "alive": True, "exists": True, "stale": False,
-                "last_active": old_time, "message_count": 10,
-            }
-            mock_send.return_value = {"ok": True, "started": True, "pid": 12345}
-
-            result = ts.trigger_scheduler()
-            assert result["ok"]
-            assert result["action"] == "wake_up"
-            mock_send.assert_called_once()
-
-
-# ══════════════════════════════════════════
-# Test: No Lock Functions Exist
-# ══════════════════════════════════════════
-
-class TestNoLockFunctions:
-    def test_no_acquire_lock(self):
-        """trigger_scheduler should not have acquire_lock function."""
-        import trigger_scheduler as ts
-        assert not hasattr(ts, "acquire_lock")
-
-    def test_no_release_lock(self):
-        """trigger_scheduler should not have release_lock function."""
-        import trigger_scheduler as ts
-        assert not hasattr(ts, "release_lock")
-
-    def test_no_check_lock(self):
-        """trigger_scheduler should not have check_lock function."""
-        import trigger_scheduler as ts
-        assert not hasattr(ts, "check_lock")
-
-    def test_no_lock_file_constant(self):
-        """trigger_scheduler should not have LOCK_FILE constant."""
-        import trigger_scheduler as ts
-        assert not hasattr(ts, "LOCK_FILE")
-
-
-# ══════════════════════════════════════════
 # Test: Completed Tasks / Review Follow-up
 # ══════════════════════════════════════════
 
 class TestCompletedTasks:
     def test_no_review_tasks(self):
-        import scheduler as sch
+        import scheduler_legacy as sch
         result = sch.check_completed_tasks()
         assert result == []
 
     def test_review_task_with_pending_review(self):
-        import scheduler as sch
+        import scheduler_legacy as sch
         import brain_manager as bm
 
         _create_task("T-20260330-001", status="review")
@@ -1255,7 +452,7 @@ class TestCompletedTasks:
 class TestCircularDependency:
     def test_mutual_dependency_neither_dispatched(self):
         """A depends on B, B depends on A — neither should be scheduled."""
-        import scheduler as sch
+        import scheduler_legacy as sch
         _create_task("T-20260330-001", status="queued", blocked_by=["T-20260330-002"])
         _create_task("T-20260330-002", status="queued", blocked_by=["T-20260330-001"])
 
@@ -1266,7 +463,7 @@ class TestCircularDependency:
 
     def test_three_way_cycle(self):
         """A→B→C→A cycle — none should be scheduled."""
-        import scheduler as sch
+        import scheduler_legacy as sch
         _create_task("T-20260330-001", status="queued", blocked_by=["T-20260330-003"])
         _create_task("T-20260330-002", status="queued", blocked_by=["T-20260330-001"])
         _create_task("T-20260330-003", status="queued", blocked_by=["T-20260330-002"])
@@ -1283,7 +480,7 @@ class TestCircularDependency:
 class TestTransitionTaskFailure:
     def test_save_failure_recorded_as_error(self):
         """When transition_task raises, the task should appear in errors, not skipped_dependency."""
-        import scheduler as sch
+        import scheduler_legacy as sch
         import brain_manager as bm
 
         _create_task("T-20260330-001", status="queued")
@@ -1303,7 +500,7 @@ class TestTransitionTaskFailure:
 
     def test_invalid_transition_recorded_as_error(self):
         """transition_task raises ValueError for invalid FSM transition."""
-        import scheduler as sch
+        import scheduler_legacy as sch
         import brain_manager as bm
 
         _create_task("T-20260330-001", status="queued")
@@ -1317,75 +514,22 @@ class TestTransitionTaskFailure:
 
 
 # ══════════════════════════════════════════
-# Test: transition_task Function (brain_manager)
-# ══════════════════════════════════════════
-
-class TestTransitionTask:
-    def test_valid_transition(self):
-        import brain_manager as bm
-        _create_task("T-20260330-001", status="queued")
-        updated = bm.transition_task("T-20260330-001", "executing")
-        assert updated["status"] == "executing"
-        # Verify persisted
-        reloaded = bm.load_task("T-20260330-001")
-        assert reloaded["status"] == "executing"
-
-    def test_invalid_transition_raises(self):
-        import brain_manager as bm
-        _create_task("T-20260330-001", status="done")
-        with pytest.raises(ValueError, match="Invalid transition"):
-            bm.transition_task("T-20260330-001", "executing")
-
-    def test_decision_logged(self):
-        import brain_manager as bm
-        _create_task("T-20260330-001", status="queued")
-        bm.transition_task("T-20260330-001", "executing", note="test")
-        decisions = bm.list_decisions(limit=10)
-        assert any(
-            d.get("type") == "status_change" and d.get("task_id") == "T-20260330-001"
-            for d in decisions
-        )
-
-    def test_history_entry_added(self):
-        import brain_manager as bm
-        _create_task("T-20260330-001", status="queued")
-        bm.transition_task("T-20260330-001", "executing", note="scheduler dispatch")
-        task = bm.load_task("T-20260330-001")
-        last_entry = task["history"][-1]
-        assert last_entry["action"] == "status_change"
-        assert "queued → executing" in last_entry["detail"]
-        assert "scheduler dispatch" in last_entry["detail"]
-
-    def test_note_appended_to_context(self):
-        import brain_manager as bm
-        _create_task("T-20260330-001", status="queued")
-        bm.transition_task("T-20260330-001", "executing", note="my note")
-        task = bm.load_task("T-20260330-001")
-        assert "my note" in task["context"]["notes"]
-
-    def test_nonexistent_task_raises(self):
-        import brain_manager as bm
-        with pytest.raises(FileNotFoundError):
-            bm.transition_task("T-NONEXISTENT", "executing")
-
-
-# ══════════════════════════════════════════
 # Test: Round 1 Fixes — Timeout Recovery (Fix 4)
 # ══════════════════════════════════════════
 
 class TestTimeoutRecovery:
     def test_no_stale_tasks(self):
-        import scheduler as sch
+        import scheduler_legacy as sch
         assert sch.check_stale_executing_tasks() == []
 
     def test_recent_executing_not_stale(self):
-        import scheduler as sch
+        import scheduler_legacy as sch
         _create_task("T-20260330-001", status="executing")
         stale = sch.check_stale_executing_tasks()
         assert len(stale) == 0
 
     def test_old_executing_is_stale(self):
-        import scheduler as sch
+        import scheduler_legacy as sch
         import brain_manager as bm
         from datetime import timedelta
         old_time = (datetime.now().astimezone() - timedelta(minutes=90)).replace(microsecond=0).isoformat()
@@ -1397,13 +541,14 @@ class TestTimeoutRecovery:
         })
         task["updated"] = old_time
         bm.save_task(task)
+
         stale = sch.check_stale_executing_tasks()
         assert len(stale) == 1
         assert stale[0]["task_id"] == "T-20260330-001"
         assert stale[0]["elapsed_minutes"] >= 89
 
     def test_recover_stale_to_queued(self):
-        import scheduler as sch
+        import scheduler_legacy as sch
         import brain_manager as bm
         from datetime import timedelta
         old_time = (datetime.now().astimezone() - timedelta(minutes=90)).replace(microsecond=0).isoformat()
@@ -1423,7 +568,7 @@ class TestTimeoutRecovery:
         assert reloaded["status"] == "queued"
 
     def test_recover_blocked_after_max_retries(self):
-        import scheduler as sch
+        import scheduler_legacy as sch
         import brain_manager as bm
         from datetime import timedelta
         old_time = (datetime.now().astimezone() - timedelta(minutes=90)).replace(microsecond=0).isoformat()
@@ -1444,7 +589,7 @@ class TestTimeoutRecovery:
         assert reloaded["status"] == "blocked"
 
     def test_dry_run_no_state_change(self):
-        import scheduler as sch
+        import scheduler_legacy as sch
         import brain_manager as bm
         from datetime import timedelta
         old_time = (datetime.now().astimezone() - timedelta(minutes=90)).replace(microsecond=0).isoformat()
@@ -1464,7 +609,7 @@ class TestTimeoutRecovery:
         assert reloaded["status"] == "executing"
 
     def test_stale_recovered_in_report(self):
-        import scheduler as sch
+        import scheduler_legacy as sch
         import brain_manager as bm
         from datetime import timedelta
         old_time = (datetime.now().astimezone() - timedelta(minutes=90)).replace(microsecond=0).isoformat()
@@ -1488,7 +633,7 @@ class TestTimeoutRecovery:
 class TestWorkerPromptFixes:
     def test_L2_prompt_no_status_done(self, monkeypatch):
         """L2 task prompt should NOT contain --status done."""
-        import scheduler as sch
+        import scheduler_legacy as sch
         monkeypatch.setattr(sch, "LEGACY_MODE", True)
         task = _create_task("T-20260330-001", template="standard-dev", priority="P1")
         prompt = sch.generate_worker_prompt(task)
@@ -1497,7 +642,7 @@ class TestWorkerPromptFixes:
 
     def test_L0_prompt_has_status_done(self, monkeypatch):
         """L0 task prompt should contain --status done."""
-        import scheduler as sch
+        import scheduler_legacy as sch
         monkeypatch.setattr(sch, "LEGACY_MODE", True)
         task = _create_task("T-20260330-001", template="quick", priority="P2")
         prompt = sch.generate_worker_prompt(task)
@@ -1505,7 +650,7 @@ class TestWorkerPromptFixes:
 
     def test_L1_prompt_has_status_done(self, monkeypatch):
         """L1 task prompt should contain --status done."""
-        import scheduler as sch
+        import scheduler_legacy as sch
         monkeypatch.setattr(sch, "LEGACY_MODE", True)
         task = _create_task("T-20260330-001", template="standard-dev", priority="P1")
         task["files_changed"] = 1
@@ -1516,7 +661,7 @@ class TestWorkerPromptFixes:
 
     def test_prompt_has_evidence_requirements(self, monkeypatch):
         """All prompts should have evidence requirements."""
-        import scheduler as sch
+        import scheduler_legacy as sch
         monkeypatch.setattr(sch, "LEGACY_MODE", True)
         task = _create_task("T-20260330-001", template="standard-dev", priority="P1")
         prompt = sch.generate_worker_prompt(task)
@@ -1525,7 +670,7 @@ class TestWorkerPromptFixes:
 
     def test_nanobot_task_has_dev_env_guidance(self, monkeypatch):
         """Task involving nanobot code should have dev env guidance."""
-        import scheduler as sch
+        import scheduler_legacy as sch
         monkeypatch.setattr(sch, "LEGACY_MODE", True)
         task = _create_task("T-20260330-001", template="standard-dev",
                             title="修复 scheduler 调度逻辑")
@@ -1535,7 +680,7 @@ class TestWorkerPromptFixes:
 
     def test_pure_data_task_no_dev_env(self, monkeypatch):
         """Non-nanobot task should NOT have dev env guidance."""
-        import scheduler as sch
+        import scheduler_legacy as sch
         monkeypatch.setattr(sch, "LEGACY_MODE", True)
         task = _create_task("T-20260330-001", template="standard-dev",
                             title="更新 README 文档")
@@ -1543,7 +688,7 @@ class TestWorkerPromptFixes:
         assert "Dev 环境实测要求" not in prompt
 
     def test_needs_dev_test_detection(self):
-        import scheduler as sch
+        import scheduler_legacy as sch
         assert sch.needs_dev_test({"title": "修复 scheduler 调度逻辑"}) is True
         assert sch.needs_dev_test({"title": "更新 README 文档"}) is False
         assert sch.needs_dev_test({"title": "飞书消息格式优化"}) is True
@@ -1558,7 +703,7 @@ class TestReportSchema:
     """Test report schema constants."""
 
     def test_report_schema_constants_defined(self):
-        import scheduler as sched
+        import scheduler_legacy as sched
         assert hasattr(sched, "REPORT_SCHEMA")
         assert "required" in sched.REPORT_SCHEMA
         assert "valid_roles" in sched.REPORT_SCHEMA
@@ -1572,7 +717,7 @@ class TestParseWorkerReport:
     """Test parse_worker_report function."""
 
     def test_parse_valid_report(self, tmp_path, monkeypatch):
-        import scheduler as sched
+        import scheduler_legacy as sched
         reports_dir = tmp_path / "brain" / "reports"
         reports_dir.mkdir(parents=True, exist_ok=True)
         monkeypatch.setattr(sched, "REPORTS_DIR", reports_dir)
@@ -1596,7 +741,7 @@ class TestParseWorkerReport:
         assert result["verdict"] == "pass"
 
     def test_parse_invalid_json(self, tmp_path, monkeypatch):
-        import scheduler as sched
+        import scheduler_legacy as sched
         reports_dir = tmp_path / "brain" / "reports"
         reports_dir.mkdir(parents=True, exist_ok=True)
         monkeypatch.setattr(sched, "REPORTS_DIR", reports_dir)
@@ -1610,7 +755,7 @@ class TestParseWorkerReport:
         assert result is None
 
     def test_parse_missing_required_field(self, tmp_path, monkeypatch):
-        import scheduler as sched
+        import scheduler_legacy as sched
         reports_dir = tmp_path / "brain" / "reports"
         reports_dir.mkdir(parents=True, exist_ok=True)
         monkeypatch.setattr(sched, "REPORTS_DIR", reports_dir)
@@ -1629,7 +774,7 @@ class TestParseWorkerReport:
         assert result is None
 
     def test_parse_task_id_mismatch(self, tmp_path, monkeypatch):
-        import scheduler as sched
+        import scheduler_legacy as sched
         reports_dir = tmp_path / "brain" / "reports"
         reports_dir.mkdir(parents=True, exist_ok=True)
         monkeypatch.setattr(sched, "REPORTS_DIR", reports_dir)
@@ -1649,7 +794,7 @@ class TestParseWorkerReport:
         assert result is None
 
     def test_parse_no_report_file(self, tmp_path, monkeypatch):
-        import scheduler as sched
+        import scheduler_legacy as sched
         reports_dir = tmp_path / "brain" / "reports"
         reports_dir.mkdir(parents=True, exist_ok=True)
         monkeypatch.setattr(sched, "REPORTS_DIR", reports_dir)
@@ -1659,7 +804,7 @@ class TestParseWorkerReport:
 
     def test_parse_multiple_reports_takes_newest(self, tmp_path, monkeypatch):
         """When multiple reports have the same verdict, newest wins."""
-        import scheduler as sched
+        import scheduler_legacy as sched
         import time
         reports_dir = tmp_path / "brain" / "reports"
         reports_dir.mkdir(parents=True, exist_ok=True)
@@ -1693,7 +838,7 @@ class TestParseWorkerReport:
 
     def test_parse_multiple_reports_fail_first_priority(self, tmp_path, monkeypatch):
         """Fail-first: an older 'fail' verdict beats a newer 'pass' (P0-3 fix)."""
-        import scheduler as sched
+        import scheduler_legacy as sched
         import time
         reports_dir = tmp_path / "brain" / "reports"
         reports_dir.mkdir(parents=True, exist_ok=True)
@@ -1728,7 +873,7 @@ class TestParseWorkerReport:
         assert result["summary"] == "Failed report"
 
     def test_parse_with_role_filter(self, tmp_path, monkeypatch):
-        import scheduler as sched
+        import scheduler_legacy as sched
         reports_dir = tmp_path / "brain" / "reports"
         reports_dir.mkdir(parents=True, exist_ok=True)
         monkeypatch.setattr(sched, "REPORTS_DIR", reports_dir)
@@ -1765,7 +910,7 @@ class TestMakeDecision:
 
     def test_tester_pass_l2_dispatches_test_review(self):
         """V6.1: PL2 tester pass → test_review (was promote_to_review)."""
-        import scheduler as sched
+        import scheduler_legacy as sched
         report = {
             "task_id": "T-001",
             "role": "tester",
@@ -1786,7 +931,7 @@ class TestMakeDecision:
 
     def test_developer_pass_pl0_marks_done(self):
         """PL0 (quick): developer pass → mark_done directly."""
-        import scheduler as sched
+        import scheduler_legacy as sched
         report = {
             "task_id": "T-001",
             "role": "developer",
@@ -1805,7 +950,7 @@ class TestMakeDecision:
         assert decision.action == "mark_done"
 
     def test_tester_fail_dispatches_developer(self):
-        import scheduler as sched
+        import scheduler_legacy as sched
         report = {
             "task_id": "T-001",
             "role": "tester",
@@ -1826,7 +971,7 @@ class TestMakeDecision:
 
     def test_developer_pass_dispatches_code_review(self):
         """V6.1: PL2 developer pass → code_review (was tester)."""
-        import scheduler as sched
+        import scheduler_legacy as sched
         report = {
             "task_id": "T-001",
             "role": "developer",
@@ -1849,7 +994,7 @@ class TestMakeDecision:
 
     def test_developer_pass_quick_marks_done(self):
         """PL0 (quick): developer pass → mark_done. Needs smoke_test for code tasks."""
-        import scheduler as sched
+        import scheduler_legacy as sched
         report = {
             "task_id": "T-001",
             "role": "developer",
@@ -1868,7 +1013,7 @@ class TestMakeDecision:
         assert decision.action == "mark_done"
 
     def test_developer_fail_retries(self):
-        import scheduler as sched
+        import scheduler_legacy as sched
         report = {
             "task_id": "T-001",
             "role": "developer",
@@ -1887,7 +1032,7 @@ class TestMakeDecision:
         assert decision.params["role"] == "developer"
 
     def test_developer_fail_max_consecutive_blocks(self):
-        import scheduler as sched
+        import scheduler_legacy as sched
         report = {
             "task_id": "T-001",
             "role": "developer",
@@ -1911,7 +1056,7 @@ class TestMakeDecision:
         assert decision.action == "mark_blocked"
 
     def test_max_iterations_blocks(self):
-        import scheduler as sched
+        import scheduler_legacy as sched
         report = {
             "task_id": "T-001",
             "role": "developer",
@@ -1930,7 +1075,7 @@ class TestMakeDecision:
         assert "max iterations" in decision.reason
 
     def test_no_report_blocks(self):
-        import scheduler as sched
+        import scheduler_legacy as sched
         task = {
             "id": "T-001",
             "priority": "P1",
@@ -1943,7 +1088,7 @@ class TestMakeDecision:
         assert "no worker report" in decision.reason
 
     def test_blocked_verdict_blocks(self):
-        import scheduler as sched
+        import scheduler_legacy as sched
         report = {
             "task_id": "T-001",
             "role": "developer",
@@ -1962,7 +1107,7 @@ class TestMakeDecision:
 
     def test_partial_verdict_continuable_dispatches_same_role(self):
         """Partial verdict without blocker keywords should continue with same role."""
-        import scheduler as sched
+        import scheduler_legacy as sched
         report = {
             "task_id": "T-001",
             "role": "developer",
@@ -1984,7 +1129,7 @@ class TestMakeDecision:
 
     def test_partial_verdict_true_blocker_blocks(self):
         """Partial verdict with blocker keywords should mark blocked."""
-        import scheduler as sched
+        import scheduler_legacy as sched
         report = {
             "task_id": "T-001",
             "role": "developer",
@@ -2004,7 +1149,7 @@ class TestMakeDecision:
 
     def test_partial_verdict_blocker_in_issues(self):
         """Partial verdict with blocker keywords in issues should mark blocked."""
-        import scheduler as sched
+        import scheduler_legacy as sched
         report = {
             "task_id": "T-001",
             "role": "developer",
@@ -2024,7 +1169,7 @@ class TestMakeDecision:
 
     def test_partial_verdict_tester_continuable(self):
         """Partial verdict from tester should also continue with same role."""
-        import scheduler as sched
+        import scheduler_legacy as sched
         report = {
             "task_id": "T-001",
             "role": "tester",
@@ -2047,7 +1192,7 @@ class TestMakeDecision:
     def test_developer_consecutive_pass_dispatches_code_review(self):
         """T-004 scenario: developer partial → developer pass → should go to code_review, NOT blocked.
         V6.1: was tester, now code_review."""
-        import scheduler as sched
+        import scheduler_legacy as sched
         report = {
             "task_id": "T-004",
             "role": "developer",
@@ -2077,7 +1222,7 @@ class TestMakeDecision:
 
     def test_developer_consecutive_partial_blocks(self):
         """Developer partial × 2 → 3rd partial → should be blocked (prevents infinite loop)."""
-        import scheduler as sched
+        import scheduler_legacy as sched
         report = {
             "task_id": "T-005",
             "role": "developer",
@@ -2104,7 +1249,7 @@ class TestMakeDecision:
     def test_tester_consecutive_pass_dispatches_test_review(self):
         """Tester pass after consecutive tester rounds → should dispatch test_review, NOT blocked.
         V6.1: was promote_to_review/mark_done, now test_review."""
-        import scheduler as sched
+        import scheduler_legacy as sched
         report = {
             "task_id": "T-006",
             "role": "tester",
@@ -2132,7 +1277,7 @@ class TestMakeDecision:
 
     def test_tester_fail_dispatches_developer_regardless_of_consecutive(self):
         """Tester fail → developer, even after consecutive tester rounds."""
-        import scheduler as sched
+        import scheduler_legacy as sched
         report = {
             "task_id": "T-007",
             "role": "tester",
@@ -2159,7 +1304,7 @@ class TestMakeDecision:
 
     def test_tester_consecutive_partial_blocks(self):
         """Tester partial × 2 → 3rd partial → should be blocked."""
-        import scheduler as sched
+        import scheduler_legacy as sched
         report = {
             "task_id": "T-008",
             "role": "tester",
@@ -2188,7 +1333,7 @@ class TestExecuteDecision:
     """Test execute_decision function."""
 
     def test_promote_to_review_creates_review(self):
-        import scheduler as sched
+        import scheduler_legacy as sched
         import brain_manager as bm
 
         task = _create_task("T-001", status="executing", priority="P1")
@@ -2207,7 +1352,7 @@ class TestExecuteDecision:
         assert reloaded["status"] == "review"
 
     def test_mark_done_transitions(self):
-        import scheduler as sched
+        import scheduler_legacy as sched
         import brain_manager as bm
 
         # Use quick template for L0 review (can go directly to done)
@@ -2226,7 +1371,7 @@ class TestExecuteDecision:
         assert reloaded["status"] == "done"
 
     def test_mark_blocked_transitions(self):
-        import scheduler as sched
+        import scheduler_legacy as sched
         import brain_manager as bm
 
         task = _create_task("T-001", status="executing")
@@ -2242,7 +1387,7 @@ class TestExecuteDecision:
         assert reloaded["status"] == "blocked"
 
     def test_dispatch_role_updates_orchestration(self):
-        import scheduler as sched
+        import scheduler_legacy as sched
         import brain_manager as bm
 
         task = _create_task("T-001", status="executing")
@@ -2268,7 +1413,7 @@ class TestHandleWorkerCompletion:
     """Test handle_worker_completion end-to-end pipeline."""
 
     def test_full_pipeline_tester_fail_to_developer(self, tmp_path, monkeypatch):
-        import scheduler as sched
+        import scheduler_legacy as sched
         import brain_manager as bm
 
         # Setup reports dir
@@ -2303,7 +1448,7 @@ class TestHandleWorkerCompletion:
 
     def test_full_pipeline_developer_pass_to_code_review(self, tmp_path, monkeypatch):
         """V6.1: developer pass → code_review (was tester)."""
-        import scheduler as sched
+        import scheduler_legacy as sched
         import brain_manager as bm
 
         reports_dir = tmp_path / "brain" / "reports"
@@ -2334,7 +1479,7 @@ class TestHandleWorkerCompletion:
 
     def test_full_pipeline_tester_pass_to_test_review(self, tmp_path, monkeypatch):
         """V6.1: tester pass → test_review (was promote_to_review)."""
-        import scheduler as sched
+        import scheduler_legacy as sched
         import brain_manager as bm
 
         reports_dir = tmp_path / "brain" / "reports"
@@ -2364,7 +1509,7 @@ class TestGenerateWorkerPromptV2:
     """Test generate_worker_prompt_v2 function."""
 
     def test_no_brain_manager_in_prompt(self):
-        import scheduler as sched
+        import scheduler_legacy as sched
         task = _create_task("T-001", status="executing")
 
         prompt = sched.generate_worker_prompt_v2(task, "developer")
@@ -2372,7 +1517,7 @@ class TestGenerateWorkerPromptV2:
         assert "status" not in prompt.lower() or "Report Submission" in prompt
 
     def test_report_template_in_prompt(self):
-        import scheduler as sched
+        import scheduler_legacy as sched
         task = _create_task("T-001", status="executing")
 
         prompt = sched.generate_worker_prompt_v2(task, "developer")
@@ -2381,14 +1526,14 @@ class TestGenerateWorkerPromptV2:
         assert "pass|fail|blocked|partial" in prompt
 
     def test_absolute_path_in_prompt(self):
-        import scheduler as sched
+        import scheduler_legacy as sched
         task = _create_task("T-001", status="executing")
 
         prompt = sched.generate_worker_prompt_v2(task, "developer")
         assert "/data/brain/reports/T-001-developer-" in prompt
 
     def test_role_guidance_developer(self):
-        import scheduler as sched
+        import scheduler_legacy as sched
         task = _create_task("T-001", status="executing")
 
         prompt = sched.generate_worker_prompt_v2(task, "developer")
@@ -2396,7 +1541,7 @@ class TestGenerateWorkerPromptV2:
         assert "Implement" in prompt or "implement" in prompt
 
     def test_role_guidance_tester(self):
-        import scheduler as sched
+        import scheduler_legacy as sched
         task = _create_task("T-001", status="executing")
 
         prompt = sched.generate_worker_prompt_v2(task, "tester")
@@ -2404,7 +1549,7 @@ class TestGenerateWorkerPromptV2:
         assert "verify" in prompt.lower() or "test" in prompt.lower()
 
     def test_prior_context_included(self):
-        import scheduler as sched
+        import scheduler_legacy as sched
         task = _create_task("T-001", status="executing")
 
         prior_context = "## Previous attempt failed\nBug in line 42"
@@ -2416,7 +1561,7 @@ class TestLegacyMode:
     """Test LEGACY_MODE switch."""
 
     def test_legacy_mode_uses_old_prompt(self, monkeypatch):
-        import scheduler as sched
+        import scheduler_legacy as sched
         monkeypatch.setattr(sched, "LEGACY_MODE", True)
 
         task = _create_task("T-001", status="executing")
@@ -2426,7 +1571,7 @@ class TestLegacyMode:
         assert "brain_manager" in prompt.lower()
 
     def test_non_legacy_uses_new_prompt(self, monkeypatch):
-        import scheduler as sched
+        import scheduler_legacy as sched
         monkeypatch.setattr(sched, "LEGACY_MODE", False)
 
         task = _create_task("T-001", status="executing")
@@ -2441,7 +1586,7 @@ class TestHandleCompletionCLI:
     """Test handle-completion CLI command."""
 
     def test_cli_handle_completion_with_task_id(self, tmp_path, monkeypatch):
-        import scheduler as sched
+        import scheduler_legacy as sched
 
         reports_dir = tmp_path / "brain" / "reports"
         reports_dir.mkdir(parents=True, exist_ok=True)
@@ -2464,7 +1609,7 @@ class TestHandleCompletionCLI:
         assert result["ok"] is True
 
     def test_cli_handle_completion_auto_detect(self, tmp_path, monkeypatch):
-        import scheduler as sched
+        import scheduler_legacy as sched
         import time
 
         reports_dir = tmp_path / "brain" / "reports"
@@ -2491,7 +1636,6 @@ class TestHandleCompletionCLI:
         assert result is not None
 
 
-
 # ──────────────────────────────────────────
 # Phase 1: Design gate & doc triplet tests
 # ──────────────────────────────────────────
@@ -2500,27 +1644,27 @@ class TestCheckDesignGate:
     """Test check_design_gate() function."""
 
     def test_quick_template_exempt(self):
-        import scheduler as sched
+        import scheduler_legacy as sched
         task = {"id": "T-001", "template": "quick"}
         ok, reason = sched.check_design_gate(task)
         assert ok is True
         assert "exempt" in reason
 
     def test_cron_auto_exempt(self):
-        import scheduler as sched
+        import scheduler_legacy as sched
         task = {"id": "T-001", "template": "cron-auto"}
         ok, reason = sched.check_design_gate(task)
         assert ok is True
 
     def test_has_design_ref(self):
-        import scheduler as sched
+        import scheduler_legacy as sched
         task = {"id": "T-001", "template": "standard-dev", "design_ref": "D-001"}
         ok, reason = sched.check_design_gate(task)
         assert ok is True
         assert "design ref" in reason
 
     def test_has_architect_report(self, tmp_path, monkeypatch):
-        import scheduler as sched
+        import scheduler_legacy as sched
         reports_dir = tmp_path / "reports"
         reports_dir.mkdir()
         monkeypatch.setattr(sched, "REPORTS_DIR", reports_dir)
@@ -2531,27 +1675,27 @@ class TestCheckDesignGate:
         assert "architect report" in reason
 
     def test_has_architect_in_history(self):
-        import scheduler as sched
+        import scheduler_legacy as sched
         task = {"id": "T-001", "template": "standard-dev",
                 "orchestration": {"history": [{"role": "architect", "verdict": "pass"}]}}
         ok, reason = sched.check_design_gate(task)
         assert ok is True
 
     def test_emergency_exempt(self):
-        import scheduler as sched
+        import scheduler_legacy as sched
         task = {"id": "T-001", "template": "standard-dev", "emergency": True}
         ok, reason = sched.check_design_gate(task)
         assert ok is True
         assert "emergency" in reason
 
     def test_needs_design_false(self):
-        import scheduler as sched
+        import scheduler_legacy as sched
         task = {"id": "T-001", "template": "standard-dev", "needs_design": False}
         ok, reason = sched.check_design_gate(task)
         assert ok is True
 
     def test_no_design_fails(self, tmp_path, monkeypatch):
-        import scheduler as sched
+        import scheduler_legacy as sched
         reports_dir = tmp_path / "reports"
         reports_dir.mkdir()
         monkeypatch.setattr(sched, "REPORTS_DIR", reports_dir)
@@ -2562,7 +1706,7 @@ class TestCheckDesignGate:
         assert "no design document" in reason
 
     def test_feature_flag_disabled(self, monkeypatch):
-        import scheduler as sched
+        import scheduler_legacy as sched
         monkeypatch.setattr(sched, "DESIGN_GATE_ENABLED", False)
         task = {"id": "T-001", "template": "standard-dev"}
         ok, reason = sched.check_design_gate(task)
@@ -2574,20 +1718,20 @@ class TestCheckDocTriplet:
     """Test check_doc_triplet() function."""
 
     def test_quick_exempt(self):
-        import scheduler as sched
+        import scheduler_legacy as sched
         task = {"id": "T-001", "template": "quick"}
         ok, missing = sched.check_doc_triplet(task)
         assert ok is True
         assert missing == []
 
     def test_emergency_exempt(self):
-        import scheduler as sched
+        import scheduler_legacy as sched
         task = {"id": "T-001", "template": "standard-dev", "emergency": True}
         ok, missing = sched.check_doc_triplet(task)
         assert ok is True
 
     def test_has_devlog_and_design_ref(self, tmp_path, monkeypatch):
-        import scheduler as sched
+        import scheduler_legacy as sched
         reports_dir = tmp_path / "reports"
         reports_dir.mkdir()
         monkeypatch.setattr(sched, "REPORTS_DIR", reports_dir)
@@ -2597,7 +1741,7 @@ class TestCheckDocTriplet:
         assert ok is True
 
     def test_missing_devlog(self, tmp_path, monkeypatch):
-        import scheduler as sched
+        import scheduler_legacy as sched
         reports_dir = tmp_path / "reports"
         reports_dir.mkdir()
         monkeypatch.setattr(sched, "REPORTS_DIR", reports_dir)
@@ -2608,7 +1752,7 @@ class TestCheckDocTriplet:
         assert "DEVLOG.md" in missing
 
     def test_missing_design(self, tmp_path, monkeypatch):
-        import scheduler as sched
+        import scheduler_legacy as sched
         reports_dir = tmp_path / "reports"
         reports_dir.mkdir()
         monkeypatch.setattr(sched, "REPORTS_DIR", reports_dir)
@@ -2619,7 +1763,7 @@ class TestCheckDocTriplet:
         assert any("ARCHITECTURE" in m for m in missing)
 
     def test_feature_flag_disabled(self, monkeypatch):
-        import scheduler as sched
+        import scheduler_legacy as sched
         monkeypatch.setattr(sched, "DOC_TRIPLET_CHECK_ENABLED", False)
         task = {"id": "T-001", "template": "standard-dev"}
         ok, missing = sched.check_doc_triplet(task)
@@ -2630,7 +1774,7 @@ class TestDocRetryEscalation:
     """Test doc retry counter and escalation to manual review."""
 
     def test_developer_pass_missing_docs_sends_back(self, tmp_path, monkeypatch):
-        import scheduler as sched
+        import scheduler_legacy as sched
         reports_dir = tmp_path / "reports"
         reports_dir.mkdir()
         monkeypatch.setattr(sched, "REPORTS_DIR", reports_dir)
@@ -2645,7 +1789,7 @@ class TestDocRetryEscalation:
 
     def test_developer_pass_missing_docs_escalates_after_max_retry(self, tmp_path, monkeypatch):
         """Developer pass with missing docs escalates to review after MAX_DOC_RETRY retries."""
-        import scheduler as sched
+        import scheduler_legacy as sched
         reports_dir = tmp_path / "reports"
         reports_dir.mkdir()
         monkeypatch.setattr(sched, "REPORTS_DIR", reports_dir)
@@ -2663,7 +1807,7 @@ class TestDocRetryEscalation:
 
     def test_tester_pass_dispatches_test_review(self, tmp_path, monkeypatch):
         """V6.1: PL2 tester pass → test_review (doc check happens at review_check after retrospective)."""
-        import scheduler as sched
+        import scheduler_legacy as sched
         reports_dir = tmp_path / "reports"
         reports_dir.mkdir()
         monkeypatch.setattr(sched, "REPORTS_DIR", reports_dir)
@@ -2689,7 +1833,7 @@ class TestV61RoleCrossCheck:
 
     def test_pl2_architect_pass_dispatches_architect_review(self):
         """PL2: architect pass → architect_review (V6.1: review architecture before development)."""
-        import scheduler as sched
+        import scheduler_legacy as sched
         report = {
             "task_id": "T-V61-001",
             "role": "architect",
@@ -2709,7 +1853,7 @@ class TestV61RoleCrossCheck:
 
     def test_pl2_architect_review_pass_dispatches_developer(self):
         """PL2: architect_review pass → developer."""
-        import scheduler as sched
+        import scheduler_legacy as sched
         report = {
             "task_id": "T-V61-002",
             "role": "architect_review",
@@ -2730,7 +1874,7 @@ class TestV61RoleCrossCheck:
 
     def test_pl2_architect_review_fail_dispatches_architect(self):
         """PL2: architect_review fail → architect (send back to redesign)."""
-        import scheduler as sched
+        import scheduler_legacy as sched
         report = {
             "task_id": "T-V61-003",
             "role": "architect_review",
@@ -2752,7 +1896,7 @@ class TestV61RoleCrossCheck:
 
     def test_pl2_code_review_pass_dispatches_tester(self):
         """PL2: code_review pass → tester."""
-        import scheduler as sched
+        import scheduler_legacy as sched
         report = {
             "task_id": "T-V61-004",
             "role": "code_review",
@@ -2775,7 +1919,7 @@ class TestV61RoleCrossCheck:
 
     def test_pl2_code_review_fail_dispatches_developer(self):
         """PL2: code_review fail → developer (D11: check role fail sends back to execution role)."""
-        import scheduler as sched
+        import scheduler_legacy as sched
         report = {
             "task_id": "T-V61-005",
             "role": "code_review",
@@ -2799,7 +1943,7 @@ class TestV61RoleCrossCheck:
 
     def test_pl2_test_review_pass_dispatches_retrospective(self):
         """PL2: test_review pass → retrospective."""
-        import scheduler as sched
+        import scheduler_legacy as sched
         report = {
             "task_id": "T-V61-006",
             "role": "test_review",
@@ -2824,7 +1968,7 @@ class TestV61RoleCrossCheck:
 
     def test_pl2_test_review_fail_dispatches_tester(self):
         """PL2: test_review fail → tester (D11: check role fail sends back to execution role)."""
-        import scheduler as sched
+        import scheduler_legacy as sched
         report = {
             "task_id": "T-V61-007",
             "role": "test_review",
@@ -2850,7 +1994,7 @@ class TestV61RoleCrossCheck:
 
     def test_pl3_test_review_pass_dispatches_auditor(self):
         """PL3: test_review pass → auditor (not retrospective like PL2)."""
-        import scheduler as sched
+        import scheduler_legacy as sched
         report = {
             "task_id": "T-V61-008",
             "role": "test_review",
@@ -2875,14 +2019,14 @@ class TestV61RoleCrossCheck:
 
     def test_valid_roles_has_8_roles(self):
         """V6.1: VALID_ROLES should have 8 roles."""
-        import scheduler as sched
+        import scheduler_legacy as sched
         assert len(sched.VALID_ROLES) == 8
         assert "code_review" in sched.VALID_ROLES
         assert "test_review" in sched.VALID_ROLES
 
     def test_flow_transitions_count(self):
         """V6.1: FLOW_TRANSITIONS should have 34 entries (PL0:2 + PL1:2 + PL2:14 + PL3:16)."""
-        import scheduler as sched
+        import scheduler_legacy as sched
         assert len(sched.FLOW_TRANSITIONS) == 34
         # Count per PL
         pl_counts = {}
@@ -2895,14 +2039,14 @@ class TestV61RoleCrossCheck:
 
     def test_expected_flow_pl2(self):
         """V6.1: PL2 expected flow includes all 7 roles."""
-        import scheduler as sched
+        import scheduler_legacy as sched
         flow = sched._get_expected_flow("PL2")
         assert flow == ["architect", "architect_review", "developer", "code_review",
                         "tester", "test_review", "retrospective"]
 
     def test_expected_flow_pl3(self):
         """V6.1: PL3 expected flow includes all 8 roles."""
-        import scheduler as sched
+        import scheduler_legacy as sched
         flow = sched._get_expected_flow("PL3")
         assert flow == ["architect", "architect_review", "developer", "code_review",
                         "tester", "test_review", "auditor", "retrospective"]
@@ -2913,14 +2057,14 @@ class TestAssertAuditCompleted:
 
     def test_pl0_no_audit_required(self):
         """PL0: no audit required, should not raise."""
-        import scheduler as sched
+        import scheduler_legacy as sched
         task = {"id": "T-001", "priority": "P2", "workgroup": {"template": "quick"},
                 "orchestration": {"history": []}}
         sched._assert_audit_completed(task)  # should not raise
 
     def test_pl1_no_audit_required(self):
         """PL1: no audit required, should not raise."""
-        import scheduler as sched
+        import scheduler_legacy as sched
         task = {"id": "T-001", "priority": "P2", "workgroup": {"template": "standard-dev"},
                 "title": "文档整理", "description": "整理项目文档",
                 "orchestration": {"history": []}}
@@ -2929,7 +2073,7 @@ class TestAssertAuditCompleted:
 
     def test_pl2_retrospective_passed(self):
         """PL2: retrospective passed → should not raise."""
-        import scheduler as sched
+        import scheduler_legacy as sched
         task = {"id": "T-001", "priority": "P1", "workgroup": {"template": "standard-dev"},
                 "orchestration": {"history": [
                     {"role": "retrospective", "verdict": "pass"},
@@ -2938,7 +2082,7 @@ class TestAssertAuditCompleted:
 
     def test_pl2_no_retrospective_raises(self):
         """PL2: no retrospective → should raise ValueError."""
-        import scheduler as sched
+        import scheduler_legacy as sched
         task = {"id": "T-001", "priority": "P1", "workgroup": {"template": "standard-dev"},
                 "orchestration": {"history": [
                     {"role": "tester", "verdict": "pass"},
@@ -2948,7 +2092,7 @@ class TestAssertAuditCompleted:
 
     def test_pl3_auditor_passed(self):
         """PL3: auditor passed → should not raise."""
-        import scheduler as sched
+        import scheduler_legacy as sched
         task = {"id": "T-001", "priority": "P0", "workgroup": {"template": "standard-dev"},
                 "orchestration": {"history": [
                     {"role": "auditor", "verdict": "pass"},
@@ -2957,7 +2101,7 @@ class TestAssertAuditCompleted:
 
     def test_pl3_no_auditor_raises(self):
         """PL3: no auditor → should raise ValueError."""
-        import scheduler as sched
+        import scheduler_legacy as sched
         task = {"id": "T-001", "priority": "P0", "workgroup": {"template": "standard-dev"},
                 "orchestration": {"history": [
                     {"role": "retrospective", "verdict": "pass"},
@@ -2971,7 +2115,7 @@ class TestV61PromptGeneration:
 
     def test_code_review_guidance_in_prompt(self):
         """code_review role should have specific guidance in prompt."""
-        import scheduler as sched
+        import scheduler_legacy as sched
         task = {"id": "T-001", "priority": "P1", "workgroup": {"template": "standard-dev"},
                 "title": "Test task", "description": "Test"}
         prompt = sched.generate_worker_prompt_v2(task, "code_review")
@@ -2981,7 +2125,7 @@ class TestV61PromptGeneration:
 
     def test_test_review_guidance_in_prompt(self):
         """test_review role should have specific guidance in prompt."""
-        import scheduler as sched
+        import scheduler_legacy as sched
         task = {"id": "T-001", "priority": "P1", "workgroup": {"template": "standard-dev"},
                 "title": "Test task", "description": "Test"}
         prompt = sched.generate_worker_prompt_v2(task, "test_review")
@@ -2991,7 +2135,7 @@ class TestV61PromptGeneration:
 
     def test_code_review_emoji(self):
         """code_review should have 🔎 emoji in spawn instruction."""
-        import scheduler as sched
+        import scheduler_legacy as sched
         task = {"id": "T-001", "priority": "P1", "workgroup": {"template": "standard-dev"},
                 "title": "Test task", "description": "Test"}
         instruction = sched.generate_spawn_instruction_v2(task, "code_review")
@@ -2999,7 +2143,7 @@ class TestV61PromptGeneration:
 
     def test_test_review_emoji(self):
         """test_review should have 📝 emoji in spawn instruction."""
-        import scheduler as sched
+        import scheduler_legacy as sched
         task = {"id": "T-001", "priority": "P1", "workgroup": {"template": "standard-dev"},
                 "title": "Test task", "description": "Test"}
         instruction = sched.generate_spawn_instruction_v2(task, "test_review")
@@ -3007,7 +2151,7 @@ class TestV61PromptGeneration:
 
     def test_auditor_guidance_has_session_jsonl(self):
         """Auditor guidance should mention dispatcher session log when session ID is available."""
-        import scheduler as sched
+        import scheduler_legacy as sched
         task = {"id": "T-001", "priority": "P0", "workgroup": {"template": "standard-dev"},
                 "title": "Test", "description": "Test",
                 "orchestration": {"dispatcher_session_id": "test-session-123", "history": []}}

@@ -17,8 +17,8 @@ def test_version_constant():
     version = match.group(1)
     print(f"Found SCHEDULER_VERSION = '{version}'")
 
-    # 2. Check value is '1.1.0'
-    assert version == '1.1.0', f"Expected '1.1.0', got '{version}'"
+    # 2. Check value is '2.0.0'
+    assert version == '2.0.0', f"Expected '2.0.0', got '{version}'"
 
     # 3. Check semver format (X.Y.Z)
     assert re.match(r'^\d+\.\d+\.\d+$', version), f"Version '{version}' is not valid semver"
