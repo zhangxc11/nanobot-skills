@@ -58,8 +58,8 @@ VALID_TRANSITIONS: dict[str, set] = {
     "queued":    {"executing", "blocked", "dropped", "cancelled"},
     "executing": {"review", "done", "blocked", "dropped", "cancelled", "queued"},  # queued: timeout recovery
     "blocked":   {"queued", "executing", "dropped", "cancelled"},
-    "review":    {"executing", "revision", "done", "dropped", "cancelled"},
-    "revision":  {"executing", "dropped", "cancelled"},
+    "review":    {"executing", "revision", "done", "dropped", "cancelled"},  # DEPRECATED(v10): review state — replaced by role-flow patterns
+    "revision":  {"executing", "dropped", "cancelled"},  # DEPRECATED(v10): revision state — replaced by role-flow patterns
     "done":      set(),        # terminal state
     "dropped":   {"queued"},   # re-activation allowed
     "cancelled": {"queued"},   # legacy alias for dropped, re-activation allowed
@@ -198,14 +198,22 @@ def transition_task(task_id: str, new_status: str, *, note: str | None = None,
             f"Invalid transition: {current} → {new_status}. Allowed: {allowed_str}"
         )
 
-    # ── Review level gate: L2/L3 tasks must go through review before done ──
+    # ── Auditor gate: executing→done requires auditor pass (v10 改造) ──
+    # 替代旧版 review_level guard — 与 scheduler_v2.py mark_done() 双重保障
+    # review 状态和转换保留不删，其他流程仍可使用 review 路径
     if current == "executing" and new_status == "done" and not force:
-        review_level = determine_review_level(task)
-        if review_level in ("L2", "L3"):
+        orch = task.get("orchestration", {})
+        history = orch.get("history", [])
+        auditor_passed = any(
+            h.get("type") == "completion"
+            and h.get("role") == "auditor"
+            and h.get("verdict") == "pass"
+            for h in history
+        )
+        if not auditor_passed:
             raise ValueError(
-                f"任务 {task_id} 的 review 级别为 {review_level}，"
-                f"不允许从 executing 直接跳到 done。"
-                f"请先提交 review: `brain_manager.py task update {task_id} --status review`"
+                f"任务 {task_id} 未通过 Auditor 审计，不允许标记 done。"
+                f"请先执行 Auditor 角色。"
             )
 
     # ── executing→queued protection: only allowed via force (timeout recovery) ──
@@ -781,48 +789,20 @@ def cmd_task_update(args: argparse.Namespace) -> None:
     changes: dict         = {}
     history_parts: list   = []
 
+    status_changed = False
+
     if args.status:
-        current  = task["status"]
         new_stat = args.status
-        allowed  = VALID_TRANSITIONS.get(current, set())
-        if new_stat not in allowed:
-            allowed_str = ", ".join(sorted(allowed)) if allowed else "none (terminal state)"
-            output(err(f"Invalid transition: {current} → {new_stat}. Allowed: {allowed_str}"))
+        force = getattr(args, 'force', False)
+        try:
+            transition_task(args.task_id, new_stat, note=args.note, force=force)
+            # Reload task after transition (transition_task already saved it)
+            task = load_task(args.task_id)
+            changes["status"] = new_stat
+            status_changed = True
+        except ValueError as exc:
+            output(err(str(exc)))
             return
-
-        # ── Review level gate: L2/L3 tasks must go through review before done ──
-        if current == "executing" and new_stat == "done" and not getattr(args, 'force', False):
-            review_level = determine_review_level(task)
-            if review_level in ("L2", "L3"):
-                output(err(
-                    f"任务 {args.task_id} 的 review 级别为 {review_level}，"
-                    f"不允许从 executing 直接跳到 done。"
-                    f"请先: task update {args.task_id} --status review"
-                ))
-                return
-
-        # ── executing→queued protection: only allowed via --force ──
-        if current == "executing" and new_stat == "queued" and not getattr(args, 'force', False):
-            output(err(
-                f"任务 {args.task_id} 不允许从 executing 直接退回 queued。"
-                f"如遇困难请用 --status blocked。超时回收由调度器自动执行。"
-            ))
-            return
-
-        # ── Audit logging for force overrides ──
-        if getattr(args, 'force', False):
-            append_decision({
-                "type": "force_override",
-                "task_id": args.task_id,
-                "from": current,
-                "to": new_stat,
-                "note": args.note or "",
-            })
-
-        task["status"]       = new_stat
-        changes["status"]    = new_stat
-        history_parts.append(f"status: {current} → {new_stat}")
-        append_decision({"type": "status_change", "task_id": args.task_id, "from": current, "to": new_stat})
 
     if args.title:
         task["title"]        = args.title
@@ -839,18 +819,22 @@ def cmd_task_update(args: argparse.Namespace) -> None:
         task["context"]["notes"] = (existing + f"\n[{now_iso()}] {args.note}").strip()
         history_parts.append("note added")
 
-    if not history_parts:
+    if not status_changed and not history_parts:
         output(err("No changes specified"))
         return
 
-    ts = now_iso()
-    task["updated"] = ts
-    task["history"].append({
-        "timestamp": ts,
-        "action":    "updated",
-        "detail":    "; ".join(history_parts),
-    })
-    save_task(task)
+    # Only write additional history + save if there are non-status changes
+    # (transition_task already recorded the status change and saved)
+    if history_parts:
+        ts = now_iso()
+        task["updated"] = ts
+        task["history"].append({
+            "timestamp": ts,
+            "action":    "updated",
+            "detail":    "; ".join(history_parts),
+        })
+        save_task(task)
+
     output(ok({"id": task["id"], "changes": changes}))
 
 
@@ -1279,23 +1263,28 @@ def cmd_review_resolve(args: argparse.Namespace) -> None:
 
 # ──────────────────────────────────────────
 # Cross-Check: Review Level, Checklist, Structured Results
+# DEPRECATED(v10): The entire cross-check review system below is superseded by
+# role-flow patterns (dev-pipeline.md). Kept for backward compatibility only.
 # ──────────────────────────────────────────
 
-REVIEW_LEVEL_ORDER = {"L0": 0, "L1": 1, "L2": 2, "L3": 3}
+REVIEW_LEVEL_ORDER = {"L0": 0, "L1": 1, "L2": 2, "L3": 3}  # DEPRECATED(v10)
 
-ROLE_CHECKLIST_MAP = {
+ROLE_CHECKLIST_MAP = {  # DEPRECATED(v10)
     "code_reviewer": "code_review.yaml",
     "test_verifier": "test_verify.yaml",
     "safety_checker": "safety_check.yaml",
 }
 
-VALID_VERDICTS = {"go", "no_go", "conditional_go"}
-VALID_SEVERITIES = {"critical", "major", "minor"}
-VALID_CHECKLIST_RESULTS = {"pass", "fail", "conditional", "na"}
+VALID_VERDICTS = {"go", "no_go", "conditional_go"}  # DEPRECATED(v10)
+VALID_SEVERITIES = {"critical", "major", "minor"}  # DEPRECATED(v10)
+VALID_CHECKLIST_RESULTS = {"pass", "fail", "conditional", "na"}  # DEPRECATED(v10)
 
 
 def determine_review_level(task: dict) -> str:
     """Determine review level (L0/L1/L2/L3) based on task characteristics.
+
+    .. deprecated:: v10
+        Superseded by role-flow patterns (dev-pipeline.md). Kept for backward compatibility.
 
     Priority order (highest first):
       1. L3 triggers: P0, architecture change, external publish, financial logic, batch-dev
@@ -1336,7 +1325,11 @@ def determine_review_level(task: dict) -> str:
 
 
 def get_review_roles(level: str, task: dict) -> list[str]:
-    """Return recommended reviewer roles for a given review level."""
+    """Return recommended reviewer roles for a given review level.
+
+    .. deprecated:: v10
+        Superseded by role-flow patterns.
+    """
     if level == "L0":
         return []
     if level == "L1":
@@ -1355,7 +1348,11 @@ def get_review_roles(level: str, task: dict) -> list[str]:
 
 
 def load_checklist(role: str) -> dict:
-    """Load checklist YAML for a reviewer role."""
+    """Load checklist YAML for a reviewer role.
+
+    .. deprecated:: v10
+        Superseded by role-flow patterns.
+    """
     import brain_manager as _m
     filename = ROLE_CHECKLIST_MAP.get(role)
     if not filename:
@@ -1368,7 +1365,11 @@ def load_checklist(role: str) -> dict:
 
 
 def generate_task_checklist(task: dict, role: str) -> dict:
-    """Generate a task-specific checklist combining template checklist with task context."""
+    """Generate a task-specific checklist combining template checklist with task context.
+
+    .. deprecated:: v10
+        Superseded by role-flow patterns.
+    """
     checklist = load_checklist(role)
     level = determine_review_level(task)
     roles = get_review_roles(level, task)
@@ -1392,6 +1393,9 @@ def generate_task_checklist(task: dict, role: str) -> dict:
 
 def validate_review_result(result: dict) -> tuple[bool, list[str]]:
     """Validate a structured review result against the expected schema.
+
+    .. deprecated:: v10
+        Superseded by role-flow patterns.
 
     Returns (is_valid, list_of_error_messages).
     """
@@ -1439,6 +1443,9 @@ def validate_review_result(result: dict) -> tuple[bool, list[str]]:
 
 def auto_judge_review(results: list[dict]) -> dict:
     """Auto-determine Go/NoGo from a list of structured review results.
+
+    .. deprecated:: v10
+        Superseded by role-flow patterns.
 
     Rules:
     1. All go → go
@@ -1507,7 +1514,11 @@ def _load_task_review_results(task_id: str) -> list[dict]:
 
 
 def cmd_review_level(args: argparse.Namespace) -> None:
-    """CLI: brain_manager review level <task_id>"""
+    """CLI: brain_manager review level <task_id>
+
+    .. deprecated:: v10
+        Superseded by role-flow patterns.
+    """
     try:
         task = load_task(args.task_id)
     except FileNotFoundError as e:
@@ -1525,7 +1536,11 @@ def cmd_review_level(args: argparse.Namespace) -> None:
 
 
 def cmd_review_checklist(args: argparse.Namespace) -> None:
-    """CLI: brain_manager review checklist <task_id> --role <role>"""
+    """CLI: brain_manager review checklist <task_id> --role <role>
+
+    .. deprecated:: v10
+        Superseded by role-flow patterns.
+    """
     try:
         task = load_task(args.task_id)
     except FileNotFoundError as e:
@@ -1541,6 +1556,9 @@ def cmd_review_checklist(args: argparse.Namespace) -> None:
 
 def cmd_review_submit(args: argparse.Namespace) -> None:
     """CLI: brain_manager review submit <task_id> --result-file <path>
+
+    .. deprecated:: v10
+        Superseded by role-flow patterns.
 
     Design note — submit vs resolve:
       - submit: Receives a structured review result (YAML) and runs auto-judge
