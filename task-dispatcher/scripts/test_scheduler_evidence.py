@@ -43,7 +43,7 @@ def isolated_brain(tmp_path, monkeypatch):
     if str(scripts_dir) not in sys.path:
         sys.path.insert(0, str(scripts_dir))
 
-    import brain_manager as bm
+    import task_store as bm
     monkeypatch.setattr(bm, "BRAIN_DIR", brain_dir)
     monkeypatch.setattr(bm, "TASKS_DIR", brain_dir / "tasks")
     monkeypatch.setattr(bm, "REVIEWS_DIR", brain_dir / "reviews")

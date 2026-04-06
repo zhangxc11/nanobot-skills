@@ -144,11 +144,11 @@ def _today_str() -> str:
 # ──────────────────────────────────────────
 
 def _get_bm():
-    """Lazy-import brain_manager to avoid circular deps and allow standalone testing."""
+    """Lazy-import task_store to avoid circular deps and allow standalone testing."""
     _scripts_dir = Path(__file__).resolve().parent
     if str(_scripts_dir) not in sys.path:
         sys.path.insert(0, str(_scripts_dir))
-    import brain_manager as bm
+    import task_store as bm
     return bm
 
 

@@ -32,7 +32,7 @@ def brain_env(tmp_path):
     # Patch env and reimport
     with mock.patch.dict(os.environ, {"BRAIN_DIR": str(brain_dir)}):
         # Force re-resolve paths in brain_manager
-        import brain_manager
+        import task_store as brain_manager
         brain_manager.BRAIN_DIR = brain_dir
         brain_manager.TASKS_DIR = brain_dir / "tasks"
         brain_manager.REVIEWS_DIR = brain_dir / "reviews"

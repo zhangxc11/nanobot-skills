@@ -63,7 +63,7 @@ def isolated_brain(tmp_path, monkeypatch):
     if str(scripts_dir) not in sys.path:
         sys.path.insert(0, str(scripts_dir))
 
-    import brain_manager as bm
+    import task_store as bm
     monkeypatch.setattr(bm, "BRAIN_DIR", brain_dir)
     monkeypatch.setattr(bm, "TASKS_DIR", brain_dir / "tasks")
     monkeypatch.setattr(bm, "REVIEWS_DIR", brain_dir / "reviews")
@@ -91,7 +91,7 @@ def _create_task(task_id: str, status: str = "queued", priority: str = "P1",
                  created: str = "", blocked_by: list = None,
                  description: str = "") -> dict:
     """Create and save a task, return the task dict."""
-    import brain_manager as bm
+    import task_store as bm
 
     ts = created or bm.now_iso()
     task = {
@@ -322,7 +322,7 @@ class TestSpawnInstruction:
 class TestSchedulerRun:
     def test_dry_run_no_state_change(self):
         import scheduler_legacy as sch
-        import brain_manager as bm
+        import task_store as bm
         _create_task("T-20260330-001", status="queued")
 
         result = sch.run_scheduler(dry_run=True)
@@ -336,7 +336,7 @@ class TestSchedulerRun:
 
     def test_live_run_updates_status(self):
         import scheduler_legacy as sch
-        import brain_manager as bm
+        import task_store as bm
         _create_task("T-20260330-001", status="queued")
 
         result = sch.run_scheduler(dry_run=False)
@@ -425,7 +425,7 @@ class TestCompletedTasks:
 
     def test_review_task_with_pending_review(self):
         import scheduler_legacy as sch
-        import brain_manager as bm
+        import task_store as bm
 
         _create_task("T-20260330-001", status="review")
         # Create a pending review
@@ -481,7 +481,7 @@ class TestTransitionTaskFailure:
     def test_save_failure_recorded_as_error(self):
         """When transition_task raises, the task should appear in errors, not skipped_dependency."""
         import scheduler_legacy as sch
-        import brain_manager as bm
+        import task_store as bm
 
         _create_task("T-20260330-001", status="queued")
 
@@ -501,7 +501,7 @@ class TestTransitionTaskFailure:
     def test_invalid_transition_recorded_as_error(self):
         """transition_task raises ValueError for invalid FSM transition."""
         import scheduler_legacy as sch
-        import brain_manager as bm
+        import task_store as bm
 
         _create_task("T-20260330-001", status="queued")
 
@@ -530,7 +530,7 @@ class TestTimeoutRecovery:
 
     def test_old_executing_is_stale(self):
         import scheduler_legacy as sch
-        import brain_manager as bm
+        import task_store as bm
         from datetime import timedelta
         old_time = (datetime.now().astimezone() - timedelta(minutes=90)).replace(microsecond=0).isoformat()
         task = _create_task("T-20260330-001", status="executing")
@@ -549,7 +549,7 @@ class TestTimeoutRecovery:
 
     def test_recover_stale_to_queued(self):
         import scheduler_legacy as sch
-        import brain_manager as bm
+        import task_store as bm
         from datetime import timedelta
         old_time = (datetime.now().astimezone() - timedelta(minutes=90)).replace(microsecond=0).isoformat()
         task = _create_task("T-20260330-001", status="executing")
@@ -569,7 +569,7 @@ class TestTimeoutRecovery:
 
     def test_recover_blocked_after_max_retries(self):
         import scheduler_legacy as sch
-        import brain_manager as bm
+        import task_store as bm
         from datetime import timedelta
         old_time = (datetime.now().astimezone() - timedelta(minutes=90)).replace(microsecond=0).isoformat()
         task = _create_task("T-20260330-001", status="executing")
@@ -590,7 +590,7 @@ class TestTimeoutRecovery:
 
     def test_dry_run_no_state_change(self):
         import scheduler_legacy as sch
-        import brain_manager as bm
+        import task_store as bm
         from datetime import timedelta
         old_time = (datetime.now().astimezone() - timedelta(minutes=90)).replace(microsecond=0).isoformat()
         task = _create_task("T-20260330-001", status="executing")
@@ -610,7 +610,7 @@ class TestTimeoutRecovery:
 
     def test_stale_recovered_in_report(self):
         import scheduler_legacy as sch
-        import brain_manager as bm
+        import task_store as bm
         from datetime import timedelta
         old_time = (datetime.now().astimezone() - timedelta(minutes=90)).replace(microsecond=0).isoformat()
         task = _create_task("T-20260330-001", status="executing")
@@ -654,7 +654,7 @@ class TestWorkerPromptFixes:
         monkeypatch.setattr(sch, "LEGACY_MODE", True)
         task = _create_task("T-20260330-001", template="standard-dev", priority="P1")
         task["files_changed"] = 1
-        import brain_manager as bm
+        import task_store as bm
         bm.save_task(task)
         prompt = sch.generate_worker_prompt(task)
         assert "--status done" in prompt
@@ -1334,7 +1334,7 @@ class TestExecuteDecision:
 
     def test_promote_to_review_creates_review(self):
         import scheduler_legacy as sched
-        import brain_manager as bm
+        import task_store as bm
 
         task = _create_task("T-001", status="executing", priority="P1")
         decision = sched.Decision(
@@ -1353,7 +1353,7 @@ class TestExecuteDecision:
 
     def test_mark_done_transitions(self):
         import scheduler_legacy as sched
-        import brain_manager as bm
+        import task_store as bm
 
         # Use quick template for L0 review (can go directly to done)
         task = _create_task("T-001", status="executing", priority="P2", template="quick")
@@ -1372,7 +1372,7 @@ class TestExecuteDecision:
 
     def test_mark_blocked_transitions(self):
         import scheduler_legacy as sched
-        import brain_manager as bm
+        import task_store as bm
 
         task = _create_task("T-001", status="executing")
         decision = sched.Decision(
@@ -1388,7 +1388,7 @@ class TestExecuteDecision:
 
     def test_dispatch_role_updates_orchestration(self):
         import scheduler_legacy as sched
-        import brain_manager as bm
+        import task_store as bm
 
         task = _create_task("T-001", status="executing")
         decision = sched.Decision(
@@ -1414,7 +1414,7 @@ class TestHandleWorkerCompletion:
 
     def test_full_pipeline_tester_fail_to_developer(self, tmp_path, monkeypatch):
         import scheduler_legacy as sched
-        import brain_manager as bm
+        import task_store as bm
 
         # Setup reports dir
         reports_dir = tmp_path / "brain" / "reports"
@@ -1449,7 +1449,7 @@ class TestHandleWorkerCompletion:
     def test_full_pipeline_developer_pass_to_code_review(self, tmp_path, monkeypatch):
         """V6.1: developer pass → code_review (was tester)."""
         import scheduler_legacy as sched
-        import brain_manager as bm
+        import task_store as bm
 
         reports_dir = tmp_path / "brain" / "reports"
         reports_dir.mkdir(parents=True, exist_ok=True)
@@ -1480,7 +1480,7 @@ class TestHandleWorkerCompletion:
     def test_full_pipeline_tester_pass_to_test_review(self, tmp_path, monkeypatch):
         """V6.1: tester pass → test_review (was promote_to_review)."""
         import scheduler_legacy as sched
-        import brain_manager as bm
+        import task_store as bm
 
         reports_dir = tmp_path / "brain" / "reports"
         reports_dir.mkdir(parents=True, exist_ok=True)
@@ -1814,7 +1814,7 @@ class TestDocRetryEscalation:
         report = {"task_id": "T-001", "role": "tester", "verdict": "pass",
                   "summary": "Tests passed", "files_changed": ["test.py"],
                   "test_evidence": [{"type": "command_output", "command": "pytest", "result": "OK"}]}
-        import brain_manager as bm
+        import task_store as bm
         monkeypatch.setattr(bm, "determine_review_level", lambda t: "L0")
         task = {"id": "T-001", "priority": "P2",
                 "workgroup": {"template": "standard-dev"},

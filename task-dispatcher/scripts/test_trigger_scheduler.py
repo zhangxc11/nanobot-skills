@@ -50,7 +50,7 @@ def isolated_brain(tmp_path, monkeypatch):
     if str(scripts_dir) not in sys.path:
         sys.path.insert(0, str(scripts_dir))
 
-    import brain_manager as bm
+    import task_store as bm
     monkeypatch.setattr(bm, "BRAIN_DIR", brain_dir)
     monkeypatch.setattr(bm, "TASKS_DIR", brain_dir / "tasks")
     monkeypatch.setattr(bm, "REVIEWS_DIR", brain_dir / "reviews")
@@ -78,7 +78,7 @@ def _create_task(task_id: str, status: str = "queued", priority: str = "P1",
                  created: str = "", blocked_by: list = None,
                  description: str = "") -> dict:
     """Create and save a task, return the task dict."""
-    import brain_manager as bm
+    import task_store as bm
 
     ts = created or bm.now_iso()
     task = {
@@ -942,7 +942,7 @@ class TestNoLockFunctions:
 
 class TestTransitionTask:
     def test_valid_transition(self):
-        import brain_manager as bm
+        import task_store as bm
         _create_task("T-20260330-001", status="queued")
         updated = bm.transition_task("T-20260330-001", "executing")
         assert updated["status"] == "executing"
@@ -951,13 +951,13 @@ class TestTransitionTask:
         assert reloaded["status"] == "executing"
 
     def test_invalid_transition_raises(self):
-        import brain_manager as bm
+        import task_store as bm
         _create_task("T-20260330-001", status="done")
         with pytest.raises(ValueError, match="Invalid transition"):
             bm.transition_task("T-20260330-001", "executing")
 
     def test_decision_logged(self):
-        import brain_manager as bm
+        import task_store as bm
         _create_task("T-20260330-001", status="queued")
         bm.transition_task("T-20260330-001", "executing", note="test")
         decisions = bm.list_decisions(limit=10)
@@ -967,7 +967,7 @@ class TestTransitionTask:
         )
 
     def test_history_entry_added(self):
-        import brain_manager as bm
+        import task_store as bm
         _create_task("T-20260330-001", status="queued")
         bm.transition_task("T-20260330-001", "executing", note="scheduler dispatch")
         task = bm.load_task("T-20260330-001")
@@ -977,13 +977,13 @@ class TestTransitionTask:
         assert "scheduler dispatch" in last_entry["detail"]
 
     def test_note_appended_to_context(self):
-        import brain_manager as bm
+        import task_store as bm
         _create_task("T-20260330-001", status="queued")
         bm.transition_task("T-20260330-001", "executing", note="my note")
         task = bm.load_task("T-20260330-001")
         assert "my note" in task["context"]["notes"]
 
     def test_nonexistent_task_raises(self):
-        import brain_manager as bm
+        import task_store as bm
         with pytest.raises(FileNotFoundError):
             bm.transition_task("T-NONEXISTENT", "executing")

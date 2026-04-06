@@ -39,7 +39,7 @@ def isolated_brain(tmp_path, monkeypatch):
     if str(scripts_dir) not in sys.path:
         sys.path.insert(0, str(scripts_dir))
 
-    import brain_manager as bm
+    import task_store as bm
     monkeypatch.setattr(bm, "BRAIN_DIR", brain_dir)
     monkeypatch.setattr(bm, "TASKS_DIR", brain_dir / "tasks")
     monkeypatch.setattr(bm, "REVIEWS_DIR", brain_dir / "reviews")
@@ -61,7 +61,7 @@ def _create_task(task_id: str, status: str = "queued", priority: str = "P1",
                  template: str = "standard-dev", title: str = "",
                  description: str = "") -> dict:
     """Create and save a task, return the task dict."""
-    import brain_manager as bm
+    import task_store as bm
 
     ts = bm.now_iso()
     task = {
@@ -322,7 +322,7 @@ class TestNotifyOnDone:
         result = sched.execute_decision(decision, task)
         assert result["ok"] is True
 
-        import brain_manager as bm
+        import task_store as bm
         reloaded = bm.load_task("T-20260331-022")
         assert reloaded["status"] == "done"
 

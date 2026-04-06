@@ -32,7 +32,7 @@ def isolated_brain(tmp_path, monkeypatch):
 
     monkeypatch.setenv("BRAIN_DIR", str(brain_dir))
 
-    import brain_manager as bm
+    import task_store as bm
     monkeypatch.setattr(bm, "BRAIN_DIR", brain_dir)
     monkeypatch.setattr(bm, "TASKS_DIR", brain_dir / "tasks")
     monkeypatch.setattr(bm, "REVIEWS_DIR", brain_dir / "reviews")

@@ -20,7 +20,7 @@ _SCRIPTS_DIR = Path(__file__).resolve().parent
 if str(_SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS_DIR))
 
-import brain_manager as bm
+import task_store as bm
 import scheduler_legacy as scheduler
 from trigger_scheduler import build_scheduler_prompt
 

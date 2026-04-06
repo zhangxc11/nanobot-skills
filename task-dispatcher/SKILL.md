@@ -1,4 +1,4 @@
-# Task Dispatcher — Brain Manager
+# Task Dispatcher — Task Store
 
 > 任务调度与质量控制与质量控制中枢。管理任务全生命周期（创建→执行→Review→完成）、
 > 工作组模板匹配、结构化 Cross-Check Review、自动调度与派发。
@@ -30,7 +30,7 @@
 ## CLI 入口
 
 ```bash
-python3 skills/task-dispatcher/scripts/brain_manager.py <command> <subcommand> [options]
+python3 skills/task-dispatcher/scripts/task_store.py <command> <subcommand> [options]
 ```
 
 环境变量 `BRAIN_DIR` 可指定数据目录（默认 `data/brain/`）。
@@ -135,7 +135,7 @@ Cron（30min 兜底）
 1. **固定调度器 session** — 复用同一个 dispatcher session，避免每次创建新 session 的开销
 2. **调度器无状态** — 只做决策（读 REGISTRY → 排序 → 输出 spawn 指令），状态全靠 REGISTRY 文件持久化
 3. **单次派发上限 3 个** — 剩余任务下次调度再处理
-4. **Worker 结果异步回收** — worker 完成后通过 brain_manager 更新 REGISTRY，调度器下次启动自然看到
+4. **Worker 结果异步回收** — worker 完成后通过 task_store 更新 REGISTRY，调度器下次启动自然看到
 5. **换代机制** — dispatcher session 超过 500 轮自动创建继任者，防止上下文膨胀
 
 ### 调度原则
@@ -228,7 +228,7 @@ python3 skills/task-dispatcher/scripts/scheduler.py status
 2. [飞书 Session] Agent 与用户对齐目标（本质问题、期望效果）
    ↓
 3. [飞书 Session] 注册任务:
-   brain_manager.py task create --title "缓存命中率优化" --type standard-dev --priority P1
+   task_store.py task create --title "缓存命中率优化" --type standard-dev --priority P1
    → 创建 T-20260330-001 (status: queued)
    ↓
 4. [飞书 Session] 触发调度:
@@ -247,16 +247,16 @@ python3 skills/task-dispatcher/scripts/scheduler.py status
    ↓
 7. [Worker Subsession] 执行任务
    → 读取上下文 → 设计 → 开发 → 测试 → 自验
-   → brain_manager.py task update T-20260330-001 --status review
-   → brain_manager.py review add T-20260330-001 --summary "代码审查"
-   → brain_manager.py briefing update
+   → task_store.py task update T-20260330-001 --status review
+   → task_store.py review add T-20260330-001 --summary "代码审查"
+   → task_store.py briefing update
    ↓
 8. [下次调度] 发现 T-20260330-001 in review + pending review
    → 报告中列出 review_pending
    ↓
 9. [飞书 Session] 用户说"查看待审"
    → 读 BRIEFING → 读 review → 展示给用户
-   → 用户 approve → brain_manager.py review resolve ... --decision approved
+   → 用户 approve → task_store.py review resolve ... --decision approved
    → 状态 → done
 ```
 
@@ -278,13 +278,14 @@ data/brain/
 skills/task-dispatcher/
 ├── SKILL.md            # 本文件
 ├── scripts/
-│   ├── brain_manager.py        # CLI 主程序
+│   ├── task_store.py           # CLI 主程序（原 brain_manager.py）
+│   ├── brain_manager.py        # 兼容 shim → task_store.py
 │   ├── scheduler.py            # 调度器核心逻辑 (v2)
 │   ├── scheduler_legacy.py     # 调度器旧版本 (deprecated v1)
 │   ├── trigger_scheduler.py    # 调度触发器（固定 session + 换代机制）
 │   ├── review_connector.py     # Review 上下文加载
 │   ├── feishu_notify.py        # 飞书通知格式化 + 回复解析
-│   ├── test_brain_manager.py   # brain_manager 测试
+│   ├── test_brain_manager.py   # task_store 测试
 │   ├── test_trigger_scheduler.py  # dispatcher 触发器测试
 │   ├── test_scheduler_legacy.py   # 旧版调度器测试
 │   ├── test_feishu_notify.py   # 飞书通知模块测试
@@ -313,13 +314,13 @@ python3 skills/task-dispatcher/scripts/feishu_notify.py parse "<用户消息>"
 
 | action | 执行命令 |
 |--------|---------|
-| approve | `brain_manager.py review resolve <task_id> --decision approved` |
-| reject | `brain_manager.py review resolve <task_id> --decision rejected --note "<comment>"` |
-| conditional_approve | `brain_manager.py review resolve <task_id> --decision approved --note "条件: <comment>"` |
-| pause | `brain_manager.py task update <task_id> --status blocked --note "用户暂停"` |
-| cancel | `brain_manager.py task update <task_id> --status cancelled --note "<comment>"` |
-| resume | `brain_manager.py task update <task_id> --status executing --note "用户恢复"` |
-| defer | `brain_manager.py review resolve <task_id> --decision deferred` |
+| approve | `task_store.py review resolve <task_id> --decision approved` |
+| reject | `task_store.py review resolve <task_id> --decision rejected --note "<comment>"` |
+| conditional_approve | `task_store.py review resolve <task_id> --decision approved --note "条件: <comment>"` |
+| pause | `task_store.py task update <task_id> --status blocked --note "用户暂停"` |
+| cancel | `task_store.py task update <task_id> --status cancelled --note "<comment>"` |
+| resume | `task_store.py task update <task_id> --status executing --note "用户恢复"` |
+| defer | `task_store.py review resolve <task_id> --decision deferred` |
 | comment | 加载任务上下文，作为对话继续处理 |
 
 ### 确认

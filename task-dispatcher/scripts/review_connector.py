@@ -13,12 +13,12 @@ import os
 import sys
 from pathlib import Path
 
-# Ensure scripts/ is on sys.path so we can import brain_manager
+# Ensure scripts/ is on sys.path so we can import task_store
 _SCRIPTS_DIR = Path(__file__).resolve().parent
 if str(_SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS_DIR))
 
-import brain_manager as bm
+import task_store as bm
 
 
 # ──────────────────────────────────────────
@@ -57,9 +57,9 @@ def cmd_pending() -> None:
         "  ```",
         "  python3 review_connector.py load <review_id>",
         "  ```",
-        "- 批准：`python3 brain_manager.py review resolve <review_id> --decision approved`",
-        "- 拒绝：`python3 brain_manager.py review resolve <review_id> --decision rejected --note '原因'`",
-        "- 推迟：`python3 brain_manager.py review resolve <review_id> --decision deferred`",
+        "- 批准：`python3 task_store.py review resolve <review_id> --decision approved`",
+        "- 拒绝：`python3 task_store.py review resolve <review_id> --decision rejected --note '原因'`",
+        "- 推迟：`python3 task_store.py review resolve <review_id> --decision deferred`",
         "",
     ]
 
@@ -141,9 +141,9 @@ def cmd_load(review_id: str) -> None:
         "",
         "### 操作指令",
         "",
-        f"**批准**: `python3 brain_manager.py review resolve {review_id} --decision approved`",
-        f"**拒绝**: `python3 brain_manager.py review resolve {review_id} --decision rejected --note '原因'`",
-        f"**推迟**: `python3 brain_manager.py review resolve {review_id} --decision deferred`",
+        f"**批准**: `python3 task_store.py review resolve {review_id} --decision approved`",
+        f"**拒绝**: `python3 task_store.py review resolve {review_id} --decision rejected --note '原因'`",
+        f"**推迟**: `python3 task_store.py review resolve {review_id} --decision deferred`",
         "",
     ]
 

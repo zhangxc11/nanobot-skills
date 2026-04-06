@@ -23,7 +23,7 @@ from pathlib import Path
 
 import yaml
 
-# Ensure scripts/ is on sys.path so we can import brain_manager
+# Ensure scripts/ is on sys.path so we can import task_store as brain_manager
 _SCRIPTS_DIR = Path(__file__).resolve().parent
 if str(_SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS_DIR))
@@ -32,7 +32,7 @@ if str(_SCRIPTS_DIR) not in sys.path:
 def _reload_bm(brain_dir: str):
     """Set BRAIN_DIR env var and reload brain_manager; return the module."""
     os.environ["BRAIN_DIR"] = brain_dir
-    import brain_manager
+    import task_store as brain_manager
     importlib.reload(brain_manager)
     return brain_manager
 

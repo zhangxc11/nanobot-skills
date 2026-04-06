@@ -32,10 +32,10 @@ from typing import Optional
 # ── Ensure brain_manager is importable (same directory) ──
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-import brain_manager  # noqa: E402
+import task_store as brain_manager  # noqa: E402  # backward compat alias
 
 # Reuse from brain_manager
-from brain_manager import (  # noqa: E402
+from task_store import (  # noqa: E402
     BRAIN_DIR,
     WORKSPACE_ROOT,
     list_tasks,

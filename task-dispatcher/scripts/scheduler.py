@@ -31,12 +31,12 @@ import sys
 from datetime import datetime, timedelta
 from pathlib import Path
 
-# ── Ensure scripts/ is on sys.path for brain_manager import ──
+# ── Ensure scripts/ is on sys.path for task_store import ──
 _SCRIPTS_DIR = Path(__file__).resolve().parent
 if str(_SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS_DIR))
 
-import brain_manager as bm
+import task_store as bm
 
 # ──────────────────────────────────────────
 # Configuration
@@ -522,7 +522,7 @@ def check_audit(task: dict) -> bool:
 # ──────────────────────────────────────────
 
 def mark_done(task_id: str) -> dict:
-    """Mark task as done. Requires auditor pass (double-check with brain_manager guard)."""
+    """Mark task as done. Requires auditor pass (double-check with task_store guard)."""
     task = bm.load_task(task_id)
 
     # Scheduler-level audit check (first layer)
@@ -533,7 +533,7 @@ def mark_done(task_id: str) -> dict:
             "reason": "auditor not executed or not passed — spawn auditor first",
         }
 
-    # brain_manager.transition_task has its own guard (second layer)
+    # task_store.transition_task has its own guard (second layer)
     try:
         bm.transition_task(task_id, "done", note="completed via scheduler")
     except ValueError as exc:

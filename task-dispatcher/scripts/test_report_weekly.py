@@ -30,7 +30,7 @@ def brain_env(tmp_path):
     (brain_dir / "reports" / "cil-weekly").mkdir(parents=True)
 
     with mock.patch.dict(os.environ, {"BRAIN_DIR": str(brain_dir)}):
-        import brain_manager
+        import task_store as brain_manager
         brain_manager.BRAIN_DIR = brain_dir
         brain_manager.TASKS_DIR = brain_dir / "tasks"
         brain_manager.REVIEWS_DIR = brain_dir / "reviews"
