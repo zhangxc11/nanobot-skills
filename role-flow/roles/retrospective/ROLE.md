@@ -54,6 +54,35 @@
 
 ---
 
+## 报告输出（硬约束）
+
+完成工作后，你**必须**将完整报告以 JSON 格式写入文件。
+
+### 报告路径
+
+- 如果 spawn prompt 中提供了 `report_path`，写入该路径
+- 如果未提供，使用默认路径：`/Users/zhangxingcheng/.nanobot/workspace/data/brain/reports/{task_id}-{role}-R1-{YYYYMMDDHHMMSS}.json`
+- ⚠️ 如果目标目录不存在，先创建目录再写入
+
+### 必填字段（缺任何一个 = 报告无效）
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| task_id | string | 任务ID，如 "T-20260407-005" |
+| role | string | 当前角色名，如 "retrospective" |
+| round | int | 轮次，默认1 |
+| verdict | string | 只能用 pass/fail/blocked/partial |
+| summary | string | 一句话总结 |
+| timestamp | string | ISO8601 时间戳 |
+
+### 关键要求
+
+- **把你产出的所有字段都写入报告 JSON**，不要遗漏（如 test_evidence、acceptance_plan、issues、files_changed、output_files 等）
+- 写入文件后，在文本回复中确认：`✅ 报告已写入: {path}`
+- 如果写入失败，在文本回复中明确报告内容（作为 fallback）
+
+---
+
 ## 参考文档
 
 - [经验积累](experience.md) — 历次执行中沉淀的经验教训，执行前建议阅读

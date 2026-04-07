@@ -17,6 +17,7 @@ CLI:
     python3 scheduler.py run [--parent SESSION_ID] [--dry-run]
     python3 scheduler.py record-spawn --task-id T-xxx --role R [--phase P]
     python3 scheduler.py handle-completion --task-id T-xxx
+    python3 scheduler.py generate-report-path --task-id T-xxx --role tester [--round 1]
     python3 scheduler.py mark-done --task-id T-xxx
     python3 scheduler.py mark-blocked --task-id T-xxx --reason "..."
     python3 scheduler.py status
@@ -336,6 +337,22 @@ def record_spawn(task_id: str, role: str, phase: str | None = None) -> dict:
     orch["current_role"] = role
     bm.save_task(task)
     return {"ok": True, "task_id": task_id, "role": role, "phase": phase}
+
+
+# ──────────────────────────────────────────
+# Report Path Generation
+# ──────────────────────────────────────────
+
+def generate_report_path(task_id: str, role: str, round_num: int = 1) -> str:
+    """Generate standard report file path for a role to write to.
+
+    Called by Dispatcher before spawning a role, so the role knows
+    where to write its report JSON.
+    """
+    ts = datetime.now().strftime('%Y%m%d%H%M%S')
+    filename = f"{task_id}-{role}-R{round_num}-{ts}.json"
+    path = REPORTS_DIR / filename
+    return str(path)
 
 
 # ──────────────────────────────────────────
@@ -685,6 +702,12 @@ def main():
     p_block.add_argument("--task-id", required=True, help="Task ID")
     p_block.add_argument("--reason", required=True, help="Block reason")
 
+    # generate-report-path
+    p_rpath = sub.add_parser("generate-report-path", help="Generate report file path for role")
+    p_rpath.add_argument("--task-id", required=True, help="Task ID")
+    p_rpath.add_argument("--role", required=True, help="Role name")
+    p_rpath.add_argument("--round", type=int, default=1, help="Round number (default: 1)")
+
     # status
     sub.add_parser("status", help="Show current scheduler status")
 
@@ -701,6 +724,9 @@ def main():
             result = mark_done(args.task_id)
         elif args.command == "mark-blocked":
             result = mark_blocked(args.task_id, args.reason)
+        elif args.command == "generate-report-path":
+            path = generate_report_path(args.task_id, args.role, getattr(args, 'round', 1))
+            result = {"ok": True, "report_path": path}
         elif args.command == "status":
             result = get_status()
         else:
