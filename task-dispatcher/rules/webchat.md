@@ -1,6 +1,6 @@
 # web-chat 项目规则
 
-<!-- detection_keywords: web-chat, webchat, CronPage, frontend, vite, react -->
+<!-- detection_keywords: web-chat, webchat, CronPage, frontend, vite, react, typescript, chat-ui, web_chat, 前端 -->
 
 ## 🔴 L0 MUST（违反即失败）
 
@@ -21,3 +21,12 @@ prod 的 dist 目录通过 rsync/cp 从 dev 同步，禁止在 prod 目录直接
 - Dev 环境: http://localhost:9081
 - Prod 环境: http://localhost:8081
 - 在 dev 环境验证页面功能、交互逻辑正常后，再同步到 prod。
+
+### WEB-004: 前端改动必须浏览器实测+截图
+涉及 UI 的改动必须在浏览器中实际加载并验证。
+使用 browser skill 截图作为验收证据。
+纯样式/布局改动也需要截图确认。
+
+### WEB-005: TypeScript 类型检查
+前端代码必须通过 TypeScript 类型检查（`npx tsc --noEmit`）。
+不允许使用 `@ts-ignore` 或 `any` 绕过类型检查（除非有充分理由并在报告中说明）。

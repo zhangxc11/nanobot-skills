@@ -130,6 +130,30 @@ Cron（30min 兜底）
     └── 触发 → trigger_scheduler.py → 唤醒/创建 Dispatcher Session → spawn workers
 ```
 
+### 调度输出格式（V2）
+
+`scheduler.py run` 为每个待派发任务输出以下结构：
+
+```json
+{
+  "task_id": "T-20260407-001",
+  "title": "...",
+  "flow_type": "standard-dev",
+  "pattern": "dev-pipeline",
+  "pattern_path": "skills/role-flow/patterns/dev-pipeline.md",
+  "priority": "P1",
+  "status": "executing"
+}
+```
+
+- `pattern`: 流程模板名称，由 flow_type 映射（见 scheduler.py `PATTERN_MAP`）
+- `pattern_path`: pattern 文档的相对路径（相对于 WORKSPACE），Dispatcher agent 读取此文档了解角色流转规则
+
+Dispatcher agent 收到输出后：
+1. 读取 `pattern_path` 指定的 pattern 文档
+2. 按 pattern 定义的角色顺序 spawn worker
+3. Worker 完成后按 pattern 的流转规则决定下一步
+
 ### 核心设计约束
 
 1. **固定调度器 session** — 复用同一个 dispatcher session，避免每次创建新 session 的开销
@@ -239,11 +263,19 @@ python3 skills/task-dispatcher/scripts/scheduler.py status
    → 发现 T-20260330-001 queued
    → 优先级排序 → 依赖检查 → 并发检查
    → 更新状态 queued → executing
+   → 输出包含 pattern="dev-pipeline", pattern_path="skills/role-flow/patterns/dev-pipeline.md"
+   ↓
+5.5 [Dispatcher Session] 读取 pattern_path 指定的 dev-pipeline.md
+   → 确定第一个角色为 Architect
+   → 读取 _nanobot-skills/role-flow/roles/architect/ROLE.md
    → 生成 worker prompt（含验收要求）
    → 输出 spawn 指令
    ↓
-6. [Dispatcher Session] 创建 worker subsession
+6. [Dispatcher Session] 创建 Architect worker subsession
    → bash create_subsession.sh --session-key "webchat:worker_xxx_T-20260330-001" ...
+   ↓
+6.5 [Dispatcher Session] Architect pass → 读 pattern → 下一角色 Architect Review → spawn
+   → 按 pattern 定义的流转规则继续（Developer → Code Review → Tester → ...）
    ↓
 7. [Worker Subsession] 执行任务
    → 读取上下文 → 设计 → 开发 → 测试 → 自验
@@ -262,6 +294,20 @@ python3 skills/task-dispatcher/scripts/scheduler.py status
 
 ---
 
+## 依赖关系
+
+### role-flow（必需）
+
+Task Dispatcher V2 依赖 role-flow skill 提供角色定义和流程模板：
+
+- **Pattern 文档**: `_nanobot-skills/role-flow/patterns/*.md` — 定义角色流转规则
+- **角色定义**: `_nanobot-skills/role-flow/roles/*/ROLE.md` — 定义每个角色的职责和输出格式
+
+Dispatcher agent 在派发任务时读取 pattern 文档，Worker agent 在执行时读取角色定义。
+如果 role-flow skill 缺失，Dispatcher 无法确定角色流转规则，任务将无法正常调度。
+
+---
+
 ## 数据目录结构
 
 ```
@@ -277,26 +323,46 @@ data/tasks/
 
 skills/task-dispatcher/
 ├── SKILL.md            # 本文件
+├── ARCHITECTURE.md     # 架构约束（V1 + V2 变更说明）
 ├── scripts/
-│   ├── task_store.py           # CLI 主程序（原 brain_manager.py）
-│   ├── brain_manager.py        # 兼容 shim → task_store.py
+│   ├── task_store.py           # CLI 主程序（任务/Review/模板管理）
+│   ├── brain_manager.py        # deprecated shim → task_store.py（保留兼容）
 │   ├── scheduler.py            # 调度器核心逻辑 (v2)
-│   ├── scheduler_legacy.py     # 调度器旧版本 (deprecated v1)
 │   ├── trigger_scheduler.py    # 调度触发器（固定 session + 换代机制）
 │   ├── review_connector.py     # Review 上下文加载
 │   ├── feishu_notify.py        # 飞书通知格式化 + 回复解析
-│   ├── test_brain_manager.py   # task_store 测试
-│   ├── test_trigger_scheduler.py  # dispatcher 触发器测试
-│   ├── test_scheduler_legacy.py   # 旧版调度器测试
-│   ├── test_feishu_notify.py   # 飞书通知模块测试
-│   └── test_templates.py       # 模板集成测试
+│   ├── report_daily.py         # 日报生成
+│   ├── report_weekly.py        # 周报生成
+│   ├── test_*.py               # V2 测试套件
+│   └── archive/                # V1 归档代码（scheduler_legacy.py 等）
 ├── templates/
 │   └── *.yaml                  # 工作组模板
-└── checklists/
-    ├── code_review.yaml
-    ├── test_verify.yaml
-    └── safety_check.yaml
+├── checklists/
+│   ├── code_review.yaml
+│   ├── test_verify.yaml
+│   └── safety_check.yaml
+└── rules/
+    └── *.md                    # 业务规则文件
+
+_nanobot-skills/role-flow/      # 角色系统（V2 依赖）
+├── patterns/*.md               # 流程模板（dev-pipeline 等）
+└── roles/*/ROLE.md             # 角色定义（architect, developer 等）
 ```
+
+## 飞书通知架构
+
+Task Dispatcher 通过以下 4 条路径发送飞书通知，各有明确职责：
+
+| # | 触发源 | 文件/机制 | 职责 | 通知内容 |
+|---|--------|-----------|------|----------|
+| 1 | scheduler.py 状态变更 | `scheduler.py` → `feishu_messenger.py` | 任务生命周期事件 | 任务开始执行/完成/阻塞 |
+| 2 | Dispatcher agent | LLM prompt 自主决定 | 流程关键节点 | 需要用户审批/决策的事项 |
+| 3 | Cron 定时触发 | `report_daily.py` / `report_weekly.py` | 定期汇总 | 日报/周报 |
+| 4 | Review 系统 | `review_connector.py notify-all` | Review 提醒 | 待审 Review 列表 |
+
+**原则**：路径 1 是程序化通知（确定性），路径 2 是 Agent 判断通知（语义性），路径 3-4 是定时/批量通知。避免同一事件通过多条路径重复通知。
+
+---
 
 ## 飞书回复路由
 

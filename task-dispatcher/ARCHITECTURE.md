@@ -1,3 +1,9 @@
+> ⚠️ **DEPRECATED (2026-04-07)**: 本文档描述 V1 架构约束。V2 架构变化请参考本文件末尾的「V2 架构变更说明」章节。
+> 设计哲学（第〇章）和大部分约束仍然适用，但以下章节需注意：
+> - §2.1 角色 Guidance 已从 `scripts/roles/*.md` 迁移至 `_nanobot-skills/role-flow/roles/`
+> - §2.2 rule_loader 机制在 V2 中已废弃，规则通过 Dispatcher agent 直接读取 `rules/*.md`
+> - §P3 角色文档路径已更新（见 V2 变更说明）
+
 # Digital Assistant — 架构约束文档
 
 > **本文档是调度器体系（dispatcher + 流程框架）自身的架构约束与设计哲学。**
@@ -186,3 +192,34 @@ Dispatcher 的目标是调度各种类型的任务（代码开发、文档整理
 | **Auditor** | 验收时 | 重点看"验收标准"、"开发约束" |
 
 > **本文档本身也应持续演进**：每次踩坑后，将教训提炼为新的约束条目补充进来，注明来源。
+
+---
+
+## 七、V2 架构变更说明（2026-04-07 补充）
+
+### 7.1 核心架构变化
+
+- **调度器**：scheduler.py 从 4186 行的全功能调度器精简为 ~500 行的工具库
+  - 角色流转逻辑从代码移至 pattern 文档（如 `dev-pipeline.md`）
+  - Dispatcher agent 读取 pattern 文档自主决策，scheduler.py 只提供工具函数
+- **角色系统**：从 `scripts/roles/*.md` 迁移至 `_nanobot-skills/role-flow/roles/`
+  - 每个角色有独立的 `ROLE.md` + `experience.md`
+  - role-flow 作为独立 skill 管理
+- **规则加载**：`rule_loader.py` 废弃，规则由 Dispatcher agent 直接读取 `rules/*.md`
+
+### 7.2 文件映射（V1 → V2）
+
+| V1 文件 | V2 对应 | 说明 |
+|---------|---------|------|
+| `scheduler.py` (4186行) | `scheduler_legacy.py` (归档至 archive/) | V1 全功能调度器 |
+| `scheduler_v2.py` | `scheduler.py` (~500行) | V2 工具库 |
+| `scripts/roles/*.md` | `_nanobot-skills/role-flow/roles/` | 角色定义迁移 |
+| `rule_loader.py` | (废弃，归档至 archive/) | 规则直接读取 |
+
+### 7.3 仍然适用的约束
+
+- 第〇章设计哲学（P1-P8）全部适用。
+- 第一章路径与环境（§1.1-1.3）全部适用。
+- 第三章 Prompt 设计（§3.1-3.3）全部适用。
+- 第五章验收标准（§5.1-5.3）全部适用。
+- 第六章开发约束（§6.1-6.3）全部适用。
