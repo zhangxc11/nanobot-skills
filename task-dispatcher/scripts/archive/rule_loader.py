@@ -18,7 +18,7 @@ from pathlib import Path
 # Constants
 # ──────────────────────────────────────────
 
-RULES_DIR = Path(__file__).resolve().parent.parent / "rules"
+RULES_DIR = Path(__file__).absolute().parent.parent / "rules"
 
 # Template → rule file mapping (template-based rules)
 TEMPLATE_RULE_FILES = {

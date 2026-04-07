@@ -32,7 +32,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 # ── Ensure scripts/ is on sys.path for task_store import ──
-_SCRIPTS_DIR = Path(__file__).resolve().parent
+_SCRIPTS_DIR = Path(__file__).absolute().parent
 if str(_SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS_DIR))
 
@@ -42,7 +42,7 @@ import task_store as bm
 # Configuration
 # ──────────────────────────────────────────
 
-WORKSPACE = Path(__file__).resolve().parent.parent.parent.parent
+WORKSPACE = Path(__file__).absolute().parent.parent.parent.parent
 MAX_CONCURRENT = 3                # Max tasks in 'executing' at any time
 MAX_DISPATCH_PER_RUN = 3          # Max NEW tasks per scheduler invocation
 STALE_TIMEOUT_HOURS = 4           # Hours before executing task is considered stale

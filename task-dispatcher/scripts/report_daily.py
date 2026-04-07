@@ -26,7 +26,7 @@ from pathlib import Path
 from typing import Optional
 
 # ── Ensure brain_manager is importable (same directory) ──
-sys.path.insert(0, str(Path(__file__).resolve().parent))
+sys.path.insert(0, str(Path(__file__).absolute().parent))
 
 import task_store as brain_manager  # noqa: E402  # backward compat alias
 

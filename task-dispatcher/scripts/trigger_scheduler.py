@@ -41,7 +41,6 @@ import json
 import os
 import random
 import subprocess
-import sys
 import time
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -51,13 +50,12 @@ from urllib.request import urlopen, Request
 # Config
 # ──────────────────────────────────────────
 
-WORKSPACE = Path(__file__).resolve().parent.parent.parent.parent
-SCRIPTS_DIR = Path(__file__).resolve().parent
+WORKSPACE = Path(__file__).absolute().parent.parent.parent.parent
+SCRIPTS_DIR = Path(__file__).absolute().parent
 SCHEDULER_SCRIPT = SCRIPTS_DIR / "scheduler.py"
 
 _brain_dir_env = os.environ.get("TASK_DATA_DIR") or os.environ.get("BRAIN_DIR")
 TASK_DATA_DIR = Path(_brain_dir_env) if _brain_dir_env else WORKSPACE / "data" / "tasks"
-BRAIN_DIR = TASK_DATA_DIR  # backward compat
 DISPATCHER_FILE = TASK_DATA_DIR / "dispatcher.json"
 
 WEBSERVER_PORT = int(os.environ.get("WEBSERVER_PORT", "8081"))
@@ -100,15 +98,6 @@ MAX_FOLLOW_UP_ON_EXHAUSTION = 3  # Max follow_up retries when worker exhausts it
 
 def _now_iso() -> str:
     return datetime.now().astimezone().replace(microsecond=0).isoformat()
-
-
-def _parse_iso(s: str) -> datetime:
-    """Parse ISO datetime string, tolerant of various formats."""
-    try:
-        return datetime.fromisoformat(s)
-    except (ValueError, TypeError):
-        from datetime import timezone
-        return datetime.min.replace(tzinfo=timezone.utc)
 
 
 # ──────────────────────────────────────────
@@ -557,37 +546,6 @@ python3 {WORKSPACE}/skills/task-dispatcher/scripts/feishu_notify.py format-error
 # Core: send message to existing session
 # ──────────────────────────────────────────
 
-def send_to_session(session_key: str, message: str, wait: int = 0) -> dict:
-    """Send a message to an existing session via worker execute-stream API.
-
-    This reuses the same session_key, so the worker appends to the existing
-    session's conversation history.
-    """
-    try:
-        payload = json.dumps({
-            "session_key": session_key,
-            "message": message,
-        }).encode("utf-8")
-
-        worker_url = f"http://127.0.0.1:{WORKER_PORT}/execute-stream"
-        req = Request(worker_url, data=payload, method="POST")
-        req.add_header("Content-Type", "application/json")
-
-        # Fire-and-forget: send request with short timeout, don't wait for completion
-        timeout = max(wait + 30, 15) if wait > 0 else 15
-        try:
-            with urlopen(req, timeout=timeout) as resp:
-                # Read a small amount to confirm it started
-                chunk = resp.read(200)
-                return {"ok": True, "started": True}
-        except Exception:
-            # Timeout is expected for fire-and-forget — the worker continues
-            return {"ok": True, "started": True, "note": "Request sent, timed out waiting (expected)"}
-
-    except Exception as e:
-        return {"ok": False, "error": str(e)}
-
-
 def send_to_session_async(session_key: str, message: str) -> dict:
     """Send a message to a session asynchronously using subprocess + curl.
 
@@ -838,7 +796,7 @@ def get_dispatcher_status() -> dict:
 
 def print_cron_setup():
     """Print instructions for setting up the 30min cron fallback."""
-    script_path = Path(__file__).resolve()
+    script_path = Path(__file__).absolute()
     # Minimal cron message — LLM only needs to run one command, no complex understanding
     cron_message = (
         f"请触发数字助理调度器：\n\n"

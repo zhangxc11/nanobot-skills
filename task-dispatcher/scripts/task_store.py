@@ -35,7 +35,7 @@ except ImportError:
 
 # Script lives at:  <workspace>/skills/task-dispatcher/scripts/task_store.py
 # So workspace root is 4 levels up.
-WORKSPACE_ROOT = Path(__file__).resolve().parent.parent.parent.parent
+WORKSPACE_ROOT = Path(__file__).absolute().parent.parent.parent.parent
 _task_data_dir_env = os.environ.get("TASK_DATA_DIR") or os.environ.get("BRAIN_DIR")
 TASK_DATA_DIR  = Path(_task_data_dir_env) if _task_data_dir_env else WORKSPACE_ROOT / "data" / "tasks"
 BRAIN_DIR      = TASK_DATA_DIR  # backward compat alias
@@ -43,7 +43,7 @@ TASKS_DIR      = TASK_DATA_DIR / "tasks"
 REVIEWS_DIR    = TASK_DATA_DIR / "reviews"
 BRIEFING_FILE  = TASK_DATA_DIR / "BRIEFING.md"
 REGISTRY_FILE  = TASK_DATA_DIR / "REGISTRY.md"
-TEMPLATES_DIR  = Path(__file__).resolve().parent.parent / "templates"
+TEMPLATES_DIR  = Path(__file__).absolute().parent.parent / "templates"
 QUICK_LOG      = TASK_DATA_DIR / "quick-log.jsonl"
 QUICK_ARCHIVE_DIR = TASK_DATA_DIR / "archive" / "quick"
 DECISIONS_LOG  = TASK_DATA_DIR / "decisions.jsonl"

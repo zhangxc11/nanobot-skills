@@ -30,7 +30,7 @@ from unittest import mock
 import pytest
 
 # ──────────────────────────────────────────
-# Fixture: isolated BRAIN_DIR
+# Fixture: isolated TASK_DATA_DIR
 # ──────────────────────────────────────────
 
 @pytest.fixture(autouse=True)
@@ -64,7 +64,7 @@ def isolated_brain(tmp_path, monkeypatch):
     # Patch trigger_scheduler paths
     import trigger_scheduler as ts
     monkeypatch.setattr(ts, "DISPATCHER_FILE", brain_dir / "dispatcher.json")
-    monkeypatch.setattr(ts, "BRAIN_DIR", brain_dir)
+    monkeypatch.setattr(ts, "TASK_DATA_DIR", brain_dir)
 
     yield brain_dir
 
