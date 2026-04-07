@@ -58,6 +58,21 @@
 - 前端开发必须截图测试，截图必须有 MD5 唯一性校验
 - Test Review 的 MD5 唯一性校验是当前最有效的前端测试质控手段
 
+### 1.5 acceptance_plan 的 E2E 步骤必须包含四要素（T-001/T-002 教训）
+
+**背景**：T-001 中 AP 13 条全部通过但 3 个真实 bug 全部漏检，T-002 中 AP-10 E2E 深度不确定导致 conditional_pass。两次问题的共同根因是 AP 中 E2E 步骤缺少具体的执行方式和验证手段，Tester 只能做 happy-path。
+
+**经验**：每个 category="e2e" 的 AP 步骤必须包含四要素：
+- `exec_method` — 具体执行命令或操作
+- `exec_env` — 执行环境（dev/prod/CI）
+- `data_flow` — 真实数据还是 mock
+- `verify_cmd` — 具体的验证命令或检查步骤
+
+**注意事项**：
+- 这四个字段已加入 acceptance_plan 的输出格式，仅 E2E 步骤必填
+- Architect 交付前必须完成 E2E 自检清单（见 ROLE.md A+ 节）
+- 如果 AP 全是 happy-path 没有边界测试，说明 AP 设计不足——不能指望 Tester 自行补充所有边界场景
+
 ---
 
 ## 二、Dev 环境与验证流程
