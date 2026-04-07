@@ -987,3 +987,60 @@ class TestTransitionTask:
         import task_store as bm
         with pytest.raises(FileNotFoundError):
             bm.transition_task("T-NONEXISTENT", "executing")
+
+
+# ══════════════════════════════════════════
+# Test: generate_report_path Function
+# ══════════════════════════════════════════
+
+class TestGenerateReportPath:
+    """Tests for scheduler.generate_report_path()."""
+
+    def test_basic_path_format(self, tmp_path, monkeypatch):
+        """Path contains correct task_id, role, round and ends with .json."""
+        import scheduler
+        monkeypatch.setattr(scheduler, "REPORTS_DIR", tmp_path / "reports")
+
+        path = scheduler.generate_report_path("T-test-001", "tester", 1)
+        assert path.startswith("/"), "Should return absolute path"
+        assert path.endswith(".json"), "Should end with .json"
+        assert "/T-test-001-tester-R1-" in path
+
+    def test_round_parameter(self, tmp_path, monkeypatch):
+        """Round parameter correctly appears as -R{n}- in path."""
+        import scheduler
+        monkeypatch.setattr(scheduler, "REPORTS_DIR", tmp_path / "reports")
+
+        path = scheduler.generate_report_path("T-test-002", "architect", 3)
+        assert "-R3-" in path
+        assert "architect" in path
+
+    def test_default_round(self, tmp_path, monkeypatch):
+        """Default round is 1 when not specified."""
+        import scheduler
+        monkeypatch.setattr(scheduler, "REPORTS_DIR", tmp_path / "reports")
+
+        path = scheduler.generate_report_path("T-test-003", "developer")
+        assert "-R1-" in path
+
+    def test_glob_pattern_compatible(self, tmp_path, monkeypatch):
+        """Generated filename matches _parse_latest_report glob pattern."""
+        import re
+        import scheduler
+        monkeypatch.setattr(scheduler, "REPORTS_DIR", tmp_path / "reports")
+
+        path = scheduler.generate_report_path("T-test-001", "tester", 1)
+        filename = Path(path).name
+        # _parse_latest_report uses glob: {task_id}-{role}-*.json
+        assert re.match(r"T-test-001-tester-R\d+-\d{14}\.json", filename), \
+            f"Filename does not match expected pattern: {filename}"
+
+    def test_uses_reports_dir(self, tmp_path, monkeypatch):
+        """Path uses the REPORTS_DIR constant."""
+        import scheduler
+        custom_dir = tmp_path / "custom" / "reports"
+        monkeypatch.setattr(scheduler, "REPORTS_DIR", custom_dir)
+
+        path = scheduler.generate_report_path("T-test-004", "auditor")
+        assert str(custom_dir) in path, \
+            f"Path should use REPORTS_DIR ({custom_dir}), got: {path}"

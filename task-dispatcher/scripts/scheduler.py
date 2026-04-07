@@ -472,7 +472,9 @@ def extract_prior_context(report: dict) -> str:
 def _parse_latest_report(task_id: str, role: str | None = None) -> dict | None:
     """Find and parse the most recent report for a task.
 
-    Reports are JSON files in REPORTS_DIR named: {task_id}-{role}-{timestamp}.json
+    Reports are JSON files in REPORTS_DIR named:
+        {task_id}-{role}-R{round}-{timestamp}.json
+    (Legacy format without R{round} is also matched by the glob.)
     """
     if not REPORTS_DIR.exists():
         return None
