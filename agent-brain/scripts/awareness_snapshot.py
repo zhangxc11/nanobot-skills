@@ -14,6 +14,7 @@ import subprocess
 import sys
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
+import yaml
 
 # ── 路径推导 ─────────────────────────────────────────────────
 # 不硬编码 skill 名称，从 __file__ 向上推导 workspace 根目录
@@ -26,6 +27,7 @@ BUDGET_BRIEFING = 600
 BUDGET_INBOX = 400
 BUDGET_TODO = 500
 BUDGET_CIL = 500
+BUDGET_CIL_DEEP = 800
 
 
 def _find_workspace(hint: str = None) -> Path:
@@ -253,6 +255,135 @@ def collect_cil_report(workspace: Path) -> dict:
     }
 
 
+
+def collect_cil_deep(workspace: Path) -> dict:
+    """深度采集 CIL 数据：insights/actions/reports 全貌。"""
+    cil_dir = workspace / "data" / "cil"
+    if not cil_dir.exists():
+        return {"error": "CIL 数据目录不存在"}
+
+    result = {
+        "insights": [],
+        "actions": [],
+        "recent_reports": [],
+        "status_distribution": {"open": 0, "resolved": 0, "dismissed": 0},
+        "action_distribution": {"proposed": 0, "approved": 0, "implementing": 0, "tracking": 0, "closed": 0, "dismissed": 0},
+        "stale_items": [],  # >7天未更新
+    }
+
+    now = datetime.now(timezone(timedelta(hours=8)))
+    stale_threshold = now - timedelta(days=7)
+
+    # ── Insights ──
+    insights_dir = cil_dir / "insights"
+    if insights_dir.exists():
+        for f in sorted(insights_dir.glob("INS-*.yaml")):
+            try:
+                data = yaml.safe_load(f.read_text(encoding="utf-8"))
+                if not data:
+                    continue
+                status = data.get("status", "unknown")
+                result["status_distribution"][status] = result["status_distribution"].get(status, 0) + 1
+
+                entry = {
+                    "id": data.get("id", f.stem),
+                    "title": data.get("title", "")[:80],
+                    "status": status,
+                    "severity": data.get("severity", "info"),
+                }
+                result["insights"].append(entry)
+
+                # Check staleness for open insights
+                if status == "open":
+                    updated = data.get("updated_at", "")
+                    if updated:
+                        try:
+                            updated_dt = datetime.fromisoformat(str(updated))
+                            if updated_dt.tzinfo is None:
+                                updated_dt = updated_dt.replace(tzinfo=timezone(timedelta(hours=8)))
+                            if updated_dt < stale_threshold:
+                                result["stale_items"].append({
+                                    "id": entry["id"],
+                                    "title": entry["title"],
+                                    "type": "insight",
+                                    "days_stale": (now - updated_dt).days,
+                                })
+                        except (ValueError, TypeError):
+                            pass
+            except Exception:
+                continue
+
+    # ── Actions ──
+    actions_dir = cil_dir / "actions"
+    if actions_dir.exists():
+        for f in sorted(actions_dir.glob("ACT-*.yaml")):
+            try:
+                data = yaml.safe_load(f.read_text(encoding="utf-8"))
+                if not data:
+                    continue
+                status = data.get("status", "unknown")
+                result["action_distribution"][status] = result["action_distribution"].get(status, 0) + 1
+
+                entry = {
+                    "id": data.get("id", f.stem),
+                    "title": data.get("title", "")[:80],
+                    "status": status,
+                    "effort": data.get("effort", "?"),
+                    "insight_id": data.get("insight_id", ""),
+                }
+                result["actions"].append(entry)
+
+                # Check staleness for active actions
+                if status in ("proposed", "approved", "implementing", "tracking"):
+                    updated = data.get("updated_at", "")
+                    if updated:
+                        try:
+                            updated_dt = datetime.fromisoformat(str(updated))
+                            if updated_dt.tzinfo is None:
+                                updated_dt = updated_dt.replace(tzinfo=timezone(timedelta(hours=8)))
+                            if updated_dt < stale_threshold:
+                                result["stale_items"].append({
+                                    "id": entry["id"],
+                                    "title": entry["title"],
+                                    "type": "action",
+                                    "status": status,
+                                    "days_stale": (now - updated_dt).days,
+                                })
+                        except (ValueError, TypeError):
+                            pass
+            except Exception:
+                continue
+
+    # ── Recent reports (latest 3 run dates) ──
+    runs_dir = cil_dir / "reports" / "runs"
+    if runs_dir.exists():
+        md_files = sorted(runs_dir.glob("*.md"), reverse=True)[:3]
+        for md in md_files:
+            try:
+                text = md.read_text(encoding="utf-8")
+                # Extract warning/critical counts from report
+                warnings = text.count("⚠️") + text.count("warning")
+                criticals = text.count("🔴") + text.count("critical")
+                # Extract concern statuses
+                healthy = text.count("✅")
+                unhealthy = text.count("⚠️")
+                result["recent_reports"].append({
+                    "date": md.stem,
+                    "healthy_concerns": healthy,
+                    "warning_concerns": unhealthy,
+                })
+            except Exception:
+                continue
+
+    # ── Weekly reports (latest) ──
+    weekly_dir = cil_dir / "reports" / "weekly"
+    if weekly_dir.exists():
+        weekly_mds = sorted(weekly_dir.glob("*.md"), reverse=True)[:1]
+        if weekly_mds:
+            result["latest_weekly"] = weekly_mds[0].stem
+
+    return result
+
 # ── 主采集逻辑 ────────────────────────────────────────────────
 
 def collect_snapshot(workspace: Path) -> dict:
@@ -280,6 +411,7 @@ def collect_snapshot(workspace: Path) -> dict:
         "inbox": {},
         "todo": {},
         "cil": {},
+        "cil_deep": {},
         "errors": [],
     }
 
@@ -306,6 +438,12 @@ def collect_snapshot(workspace: Path) -> dict:
         snapshot["cil"] = collect_cil_report(workspace)
     except Exception as e:
         snapshot["errors"].append(f"CIL 日报采集失败: {str(e)[:200]}")
+
+    # 5. CIL 深度数据
+    try:
+        snapshot["cil_deep"] = collect_cil_deep(workspace)
+    except Exception as e:
+        snapshot["errors"].append(f"CIL 深度采集失败: {str(e)[:200]}")
 
     return snapshot
 
@@ -374,6 +512,55 @@ def format_snapshot(snapshot: dict) -> str:
             section += f"\n  异常: {_truncate(anomalies, 200)}"
         parts.append(_truncate(section, BUDGET_CIL))
 
+    # CIL 深度
+    cil_deep = snapshot.get("cil_deep", {})
+    if "error" not in cil_deep and cil_deep:
+        deep_section = "\n🔬 CIL 深度:"
+
+        # Insight 状态分布
+        ins_dist = cil_deep.get("status_distribution", {})
+        open_ins = ins_dist.get("open", 0)
+        resolved_ins = ins_dist.get("resolved", 0)
+        deep_section += f"\n  洞察: {open_ins} open / {resolved_ins} resolved"
+
+        # Action 状态分布
+        act_dist = cil_deep.get("action_distribution", {})
+        active_acts = act_dist.get("proposed", 0) + act_dist.get("implementing", 0) + act_dist.get("tracking", 0)
+        closed_acts = act_dist.get("closed", 0) + act_dist.get("dismissed", 0)
+        deep_section += f"\n  行动项: {active_acts} 活跃 / {closed_acts} 已完结"
+
+        # Active actions detail
+        actions = cil_deep.get("actions", [])
+        active_list = [a for a in actions if a.get("status") in ("proposed", "approved", "implementing", "tracking")]
+        if active_list:
+            deep_section += "\n  活跃行动项:"
+            for a in active_list:
+                deep_section += f"\n    - [{a['status']}] {a['id']}: {a['title'][:60]}"
+
+        # Open insights detail
+        insights = cil_deep.get("insights", [])
+        open_list = [i for i in insights if i.get("status") == "open"]
+        if open_list:
+            deep_section += "\n  待处理洞察:"
+            for i in open_list:
+                deep_section += f"\n    - [{i['severity']}] {i['id']}: {i['title'][:60]}"
+
+        # Stale items
+        stale = cil_deep.get("stale_items", [])
+        if stale:
+            deep_section += f"\n  ⚠️ 停滞项({len(stale)}):"
+            for s in stale[:5]:
+                deep_section += f"\n    - {s['id']}({s['type']}): {s.get('days_stale',0)}天未更新 — {s['title'][:50]}"
+
+        # Recent reports trend
+        reports = cil_deep.get("recent_reports", [])
+        if reports:
+            deep_section += "\n  近期日报:"
+            for r in reports:
+                deep_section += f"\n    - {r['date']}: ✅{r.get('healthy_concerns',0)} ⚠️{r.get('warning_concerns',0)}"
+
+        parts.append(_truncate(deep_section, BUDGET_CIL_DEEP))
+
     # 错误
     errors = snapshot.get("errors", [])
     if errors:
@@ -382,8 +569,8 @@ def format_snapshot(snapshot: dict) -> str:
     result = "\n".join(parts)
 
     # 最终截断保证 ≤2K
-    if len(result) > 2000:
-        result = result[:1980] + "\n...（总体已截断至 2K）"
+    if len(result) > 3000:
+        result = result[:2980] + "\n...（总体已截断至 3K）"
 
     return result
 
